@@ -1,0 +1,50 @@
+[project]
+name = "mcp-searchbridge"
+version = "0.1.0"
+description = "Bridge an OpenAI-compatible search model into an MCP web_search tool."
+readme = "README.md"
+requires-python = ">=3.14,<3.15"
+dependencies = [
+    "httpx",
+    "mcp",
+    "openai",
+    "pydantic",
+    "pydantic-settings",
+]
+
+[project.scripts]
+mcp-searchbridge = "mcp_searchbridge:main"
+
+[build-system]
+requires = ["uv_build>=0.11.21,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.0",
+    "pytest-asyncio>=1.4.0",
+    "ruff>=0.15.17",
+]
+
+[tool.ruff]
+target-version = "py314"
+line-length = 88
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "F",
+    "I",
+    "UP",
+    "B",
+    "SIM",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/test_backend_integration.py" = ["A003", "N802"]
+"tests/test_mcp_stdio_smoke.py" = ["A003", "N802"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+docstring-code-format = true
