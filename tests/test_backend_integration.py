@@ -27,12 +27,27 @@ class _ChatCompletionsHandler(BaseHTTPRequestHandler):
         if response_format == {"type": "json_object"}:
             content = json.dumps(
                 {
-                    "answer": "Current status from fake endpoint",
+                    "summary": {
+                        "text": "Current status from fake endpoint",
+                        "citations": [
+                            {
+                                "source_id": "source_1",
+                                "chunk_id": "source_1_chunk_1",
+                            }
+                        ],
+                    },
                     "sources": [
                         {
+                            "source_id": "source_1",
                             "title": "Example Source",
                             "url": "https://example.com/status",
-                            "snippet": "Status snippet",
+                            "published_at": "2026-06-15",
+                            "evidence": [
+                                {
+                                    "chunk_id": "source_1_chunk_1",
+                                    "text": "Status snippet",
+                                }
+                            ],
                         }
                     ],
                     "warnings": [],
@@ -147,11 +162,13 @@ def test_backend_search_against_fake_openai_endpoint() -> None:
             )
         )
 
-        assert result.answer == "Current status from fake endpoint"
+        assert result.summary.text == "Current status from fake endpoint"
         assert len(result.sources) == 1
         assert str(result.sources[0].url) == "https://example.com/status"
-        assert result.provider == "openai-compatible"
-        assert result.model == "fake-search-model"
+        assert result.sources[0].published_at == "2026-06-15"
+        assert result.diagnostics.provider.name == "openai-compatible"
+        assert result.diagnostics.provider.model == "fake-search-model"
+        assert result.diagnostics.normalization.parse_mode == "structured_v2"
     finally:
         server.shutdown()
         server.server_close()
@@ -175,10 +192,12 @@ def test_backend_falls_back_when_structured_output_is_rejected() -> None:
 
         result = backend.search(SearchRequest(query="fallback test"))
 
-        assert result.answer == "Fallback answer"
+        assert result.summary.text == "Fallback answer"
         assert len(result.sources) == 1
-        assert "structured_output_not_supported" in result.warnings
-        assert "text_fallback_used" in result.warnings
+        warning_codes = [warning.code for warning in result.diagnostics.warnings]
+        assert "structured_output_not_supported" in warning_codes
+        assert "text_fallback_used" in warning_codes
+        assert result.diagnostics.normalization.response_format_accepted is False
         assert _FallbackChatCompletionsHandler.request_count == 2
     finally:
         server.shutdown()

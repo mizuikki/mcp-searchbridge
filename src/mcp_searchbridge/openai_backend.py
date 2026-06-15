@@ -51,6 +51,7 @@ class OpenAIChatSearchBackend:
 
         warnings: list[str] = []
         content = ""
+        response_format_accepted = True
 
         try:
             response = self.client.chat.completions.create(
@@ -68,6 +69,7 @@ class OpenAIChatSearchBackend:
                 exc.status_code,
             )
             warnings.append("structured_output_not_supported")
+            response_format_accepted = False
             content = self._fallback_completion(messages)
         except (
             openai.APIConnectionError,
@@ -82,11 +84,19 @@ class OpenAIChatSearchBackend:
 
         result = parse_search_response(
             content=content,
+            request=request,
             provider=self.provider_name,
             model=self.settings.openai_model,
-            max_sources=request.max_sources,
+            response_format_requested="json_object",
+            response_format_accepted=response_format_accepted,
         )
-        result.warnings = _merge_warnings(result.warnings, warnings)
+        if warnings:
+            existing_codes = {item.code for item in result.diagnostics.warnings}
+            for code in warnings:
+                if code not in existing_codes:
+                    result.diagnostics.warnings.append(
+                        _warning_info(code=code)
+                    )
         return result
 
     def _fallback_completion(self, messages: list[dict[str, str]]) -> str:
@@ -198,3 +208,10 @@ def _merge_warnings(*warning_groups: list[str]) -> list[str]:
                 merged.append(item)
                 seen.add(item)
     return merged
+
+
+def _warning_info(code: str):
+    from .models import WarningInfo
+    from .parser import WARNING_MESSAGES
+
+    return WarningInfo(code=code, message=WARNING_MESSAGES.get(code, code))

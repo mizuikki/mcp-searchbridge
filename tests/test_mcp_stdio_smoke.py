@@ -21,12 +21,24 @@ class _MCPFakeOpenAIHandler(BaseHTTPRequestHandler):
         payload = json.loads(self.rfile.read(length).decode("utf-8"))
         content = json.dumps(
             {
-                "answer": "Smoke test answer",
+                "summary": {
+                    "text": "Smoke test answer",
+                    "citations": [
+                        {"source_id": "source_1", "chunk_id": "source_1_chunk_1"}
+                    ],
+                },
                 "sources": [
                     {
+                        "source_id": "source_1",
                         "title": "Smoke Source",
                         "url": "https://example.com/smoke",
-                        "snippet": "Smoke snippet",
+                        "published_at": "2026-06-15",
+                        "evidence": [
+                            {
+                                "chunk_id": "source_1_chunk_1",
+                                "text": "Smoke snippet",
+                            }
+                        ],
                     }
                 ],
                 "warnings": [],
@@ -102,9 +114,10 @@ def test_mcp_stdio_tools_list_and_call() -> None:
                 assert not result.isError
                 assert result.structuredContent is not None
                 structured = result.structuredContent
-                assert structured["answer"] == "Smoke test answer"
+                assert structured["summary"]["text"] == "Smoke test answer"
                 assert structured["sources"][0]["url"] == "https://example.com/smoke"
-                assert structured["model"] == "smoke-model"
+                assert structured["diagnostics"]["provider"]["model"] == "smoke-model"
+                assert "answer" not in structured
 
         asyncio.run(run_smoke())
     finally:
@@ -152,8 +165,11 @@ def test_mcp_stdio_invalid_request_returns_structured_error() -> None:
                 assert not result.isError
                 assert result.structuredContent is not None
                 structured = result.structuredContent
-                assert structured["warnings"] == ["invalid_request"]
-                assert structured["answer"].startswith("Invalid search request:")
+                assert structured["diagnostics"]["status"] == "error"
+                assert structured["diagnostics"]["error"]["code"] == "invalid_request"
+                assert structured["diagnostics"]["error"]["message"].startswith(
+                    "Invalid search request:"
+                )
 
         asyncio.run(run_invalid())
     finally:

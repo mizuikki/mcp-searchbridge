@@ -21,4 +21,5 @@ def test_build_user_prompt_embeds_search_parameters() -> None:
     assert "recent model updates" in prompt
     assert '"recency": "week"' in prompt
     assert '"domain_allowlist": [' in prompt
-    assert "Return a JSON object" in prompt
+    assert '"summary": {' in prompt
+    assert '"source_id": "source_1"' in prompt

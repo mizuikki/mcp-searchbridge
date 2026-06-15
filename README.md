@@ -83,20 +83,78 @@ Output:
 
 ```json
 {
-  "answer": "Summary text",
+  "query": {
+    "text": "What happened in the latest OpenAI release?",
+    "recency": "latest",
+    "max_sources": 5,
+    "domain_allowlist": ["openai.com", "developers.openai.com"],
+    "return_mode": "standard"
+  },
+  "summary": {
+    "text": "Short synthesis",
+    "citations": [
+      {
+        "source_id": "source_1",
+        "chunk_id": "source_1_chunk_1"
+      }
+    ]
+  },
   "sources": [
     {
+      "source_id": "source_1",
+      "rank": 1,
       "title": "OpenAI release notes",
       "url": "https://example.com/release-notes",
-      "snippet": "Relevant source snippet"
+      "domain": "example.com",
+      "published_at": "2026-06-15",
+      "domain_allowed": true,
+      "evidence": [
+        {
+          "chunk_id": "source_1_chunk_1",
+          "text": "Relevant source snippet"
+        }
+      ]
     }
   ],
-  "provider": "openai-compatible",
-  "model": "your-model",
-  "raw_text": "Raw upstream content",
-  "warnings": []
+  "diagnostics": {
+    "status": "ok",
+    "provider": {
+      "name": "openai-compatible",
+      "model": "your-model"
+    },
+    "normalization": {
+      "response_format_requested": "json_object",
+      "response_format_accepted": true,
+      "parse_mode": "structured_v2"
+    },
+    "coverage": {
+      "sources_requested": 5,
+      "sources_returned": 1,
+      "sources_with_evidence": 1,
+      "evidence_chunks_returned": 1
+    },
+    "warnings": [],
+    "error": null
+  }
 }
 ```
+
+This response schema is intentionally LLM-oriented and breaking relative to
+earlier `answer` / `raw_text` / `sources[].snippet` outputs.
+
+Warning semantics:
+
+- `no_results`: the search completed, but no matching sources were returned.
+- `provider_reported_no_live_access`: preserve this only when the upstream
+  response explicitly states that it could not browse or access the live web.
+- `sources_missing_or_unverifiable`: no verifiable sources were extracted from
+  the final normalized result.
+
+For empty results, prefer interpreting warnings this way:
+
+- `status=empty` with `no_results`: the query ran, but nothing usable matched.
+- `status=empty` with `provider_reported_no_live_access`: the upstream model
+  explicitly claimed it could not use live web access for the request.
 
 ## Claude Code / Cursor MCP config
 
