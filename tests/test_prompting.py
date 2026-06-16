@@ -1,13 +1,13 @@
 from mcp_searchbridge.config import DEFAULT_SYSTEM_PROMPT
 from mcp_searchbridge.models import SearchRequest
-from mcp_searchbridge.prompts import build_system_prompt, build_user_prompt
+from mcp_searchbridge.prompts import build_search_user_prompt, build_system_prompt
 
 
 def test_build_system_prompt_uses_configured_text() -> None:
     assert build_system_prompt(DEFAULT_SYSTEM_PROMPT) == DEFAULT_SYSTEM_PROMPT
 
 
-def test_build_user_prompt_embeds_search_parameters() -> None:
+def test_build_search_user_prompt_embeds_search_parameters() -> None:
     request = SearchRequest(
         query="recent model updates",
         recency="week",
@@ -16,7 +16,7 @@ def test_build_user_prompt_embeds_search_parameters() -> None:
         return_mode="concise",
     )
 
-    prompt = build_user_prompt(request)
+    prompt = build_search_user_prompt(request)
 
     assert "recent model updates" in prompt
     assert '"recency": "week"' in prompt

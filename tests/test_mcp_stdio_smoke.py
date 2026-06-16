@@ -19,31 +19,47 @@ class _MCPFakeOpenAIHandler(BaseHTTPRequestHandler):
 
         length = int(self.headers["Content-Length"])
         payload = json.loads(self.rfile.read(length).decode("utf-8"))
-        content = json.dumps(
-            {
-                "summary": {
-                    "text": "Smoke test answer",
-                    "citations": [
-                        {"source_id": "source_1", "chunk_id": "source_1_chunk_1"}
-                    ],
-                },
-                "sources": [
-                    {
-                        "source_id": "source_1",
-                        "title": "Smoke Source",
-                        "url": "https://example.com/smoke",
-                        "published_at": "2026-06-15",
-                        "evidence": [
-                            {
-                                "chunk_id": "source_1_chunk_1",
-                                "text": "Smoke snippet",
-                            }
+        user_prompt = payload["messages"][-1]["content"]
+
+        if '"content": "page body or markdown"' in user_prompt:
+            content = json.dumps(
+                {
+                    "title": "Smoke Page",
+                    "url": "https://example.com/smoke",
+                    "content": "Smoke body",
+                    "content_format": "text",
+                    "truncated": False,
+                    "likely_rewritten": True,
+                    "warnings": [],
+                }
+            )
+        else:
+            content = json.dumps(
+                {
+                    "summary": {
+                        "text": "Smoke test answer",
+                        "citations": [
+                            {"source_id": "source_1", "chunk_id": "source_1_chunk_1"}
                         ],
-                    }
-                ],
-                "warnings": [],
-            }
-        )
+                    },
+                    "sources": [
+                        {
+                            "source_id": "source_1",
+                            "title": "Smoke Source",
+                            "url": "https://example.com/smoke",
+                            "published_at": "2026-06-15",
+                            "evidence": [
+                                {
+                                    "chunk_id": "source_1_chunk_1",
+                                    "text": "Smoke snippet",
+                                }
+                            ],
+                        }
+                    ],
+                    "warnings": [],
+                }
+            )
+
         response = {
             "id": "chatcmpl-smoke",
             "object": "chat.completion",
@@ -98,10 +114,18 @@ def test_mcp_stdio_tools_list_and_call() -> None:
                 await session.initialize()
 
                 tools = await session.list_tools()
-                assert any(tool.name == "web_search" for tool in tools.tools)
+                tool_names = {tool.name for tool in tools.tools}
+                assert tool_names == {
+                    "search_web",
+                    "extract_url",
+                    "outline_url",
+                    "docs_qa",
+                    "find_official_docs",
+                    "resolve_doc_source",
+                }
 
-                result = await session.call_tool(
-                    "web_search",
+                search_result = await session.call_tool(
+                    "search_web",
                     {
                         "query": "smoke test query",
                         "recency": "latest",
@@ -110,14 +134,26 @@ def test_mcp_stdio_tools_list_and_call() -> None:
                         "return_mode": "standard",
                     },
                 )
-
-                assert not result.isError
-                assert result.structuredContent is not None
-                structured = result.structuredContent
+                assert not search_result.isError
+                assert search_result.structuredContent is not None
+                structured = search_result.structuredContent
                 assert structured["summary"]["text"] == "Smoke test answer"
                 assert structured["sources"][0]["url"] == "https://example.com/smoke"
                 assert structured["diagnostics"]["provider"]["model"] == "smoke-model"
-                assert "answer" not in structured
+
+                extract_result = await session.call_tool(
+                    "extract_url",
+                    {
+                        "url": "https://example.com/smoke",
+                        "mode": "best_effort",
+                        "max_chars": 1000,
+                    },
+                )
+                assert not extract_result.isError
+                assert extract_result.structuredContent is not None
+                extracted = extract_result.structuredContent
+                assert extracted["title"] == "Smoke Page"
+                assert extracted["content"] == "Smoke body"
 
         asyncio.run(run_smoke())
     finally:
@@ -155,7 +191,7 @@ def test_mcp_stdio_invalid_request_returns_structured_error() -> None:
             ):
                 await session.initialize()
                 result = await session.call_tool(
-                    "web_search",
+                    "search_web",
                     {
                         "query": "invalid request",
                         "max_sources": 0,

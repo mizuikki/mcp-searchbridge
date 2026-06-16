@@ -10,12 +10,12 @@ from pydantic import HttpUrl, TypeAdapter, ValidationError
 
 from .models import (
     Citation,
-    Coverage,
-    Diagnostics,
     EvidenceChunk,
-    NormalizationInfo,
     ProviderInfo,
     QueryEcho,
+    SearchCoverage,
+    SearchDiagnostics,
+    SearchNormalizationInfo,
     SearchRequest,
     SearchResult,
     SearchSource,
@@ -58,6 +58,13 @@ WARNING_MESSAGES = {
         "Upstream provider reported no live web access."
     ),
     "no_results": "The search completed but returned no matching sources.",
+    "no_relevant_results": "The search completed but returned no matching sources.",
+    "partial_content": "Only partial page content could be extracted.",
+    "not_found_page": "The target page appears to be a 404 or not-found page.",
+    "placeholder_page": "The target page appears to be a placeholder or nav-only page.",
+    "empty_content_retried": (
+        "The upstream returned empty content and the request was retried once."
+    ),
     "published_at_unparseable": (
         "One or more published_at values were invalid and were dropped."
     ),
@@ -90,7 +97,7 @@ def parse_search_response(
                 response_format_requested=response_format_requested,
                 response_format_accepted=response_format_accepted,
             )
-        except (ValidationError, ValueError):
+        except ValidationError, ValueError:
             result = None
             warning_codes.append("structured_response_invalid")
 
@@ -607,7 +614,7 @@ def _collect_warning_codes(raw_warnings: object) -> list[str]:
         return []
     codes: list[str] = []
     for item in raw_warnings:
-        code = str(item).strip()
+        code = _normalize_warning_code(str(item).strip())
         if code:
             codes.append(code)
     return codes
@@ -657,10 +664,10 @@ def _build_result(
         ),
         summary=summary,
         sources=sources,
-        diagnostics=Diagnostics(
+        diagnostics=SearchDiagnostics(
             status=status,
             provider=ProviderInfo(name=provider, model=model),
-            normalization=NormalizationInfo(
+            normalization=SearchNormalizationInfo(
                 response_format_requested=(
                     "json_object"
                     if response_format_requested == "json_object"
@@ -669,7 +676,7 @@ def _build_result(
                 response_format_accepted=response_format_accepted,
                 parse_mode=parse_mode,
             ),
-            coverage=Coverage(
+            coverage=SearchCoverage(
                 sources_requested=request.max_sources,
                 sources_returned=len(sources),
                 sources_with_evidence=sources_with_evidence,
@@ -690,6 +697,16 @@ def _dedupe_warning_codes(codes: list[str]) -> list[str]:
     return merged
 
 
+def _normalize_warning_code(code: str) -> str:
+    aliases = {
+        "no_results_found": "no_results",
+        "no_relevant_results": "no_results",
+        "404": "not_found_page",
+        "404_page_not_found": "not_found_page",
+    }
+    return aliases.get(code, code)
+
+
 def _normalize_provider_warning_codes(
     *,
     payload: dict[str, object],
@@ -702,9 +719,7 @@ def _normalize_provider_warning_codes(
     if _payload_explicitly_reports_no_live_access(payload):
         return normalized
 
-    return [
-        code for code in normalized if code != "provider_reported_no_live_access"
-    ]
+    return [code for code in normalized if code != "provider_reported_no_live_access"]
 
 
 def _payload_explicitly_reports_no_live_access(payload: dict[str, object]) -> bool:

@@ -1,20 +1,34 @@
 # mcp-searchbridge
 
-`mcp-searchbridge` is a lightweight FastMCP server that exposes a single `web_search`
-tool backed by an OpenAI-compatible Chat Completions endpoint.
+`mcp-searchbridge` is a lightweight FastMCP server that exposes a small,
+LLM-oriented retrieval surface backed by an OpenAI-compatible Chat Completions
+endpoint.
 
-It does not implement crawling, extraction, or its own search engine. Freshness,
-live web access, and citations all depend on the upstream model or gateway you
-configure.
+It does not ship its own crawler, search engine, or docs index. Freshness, live
+web access, extraction fidelity, and source quality still depend on the upstream
+model or gateway you configure.
 
 ## Features
 
 - FastMCP server over stdio
-- Single `web_search` tool with structured output
+- Six retrieval-oriented tools instead of a single search tool
 - OpenAI-compatible `base_url`, `api_key`, and `model` configuration
-- JSON-first parsing with text fallback
-- Basic timeout, retry, logging, and upstream error handling
-- `uv`-managed Python 3.14 project with lockfile
+- JSON-first parsing with plain-text fallback where needed
+- Structured diagnostics, warnings, and normalized source objects
+- `uv`-managed Python 3.14 project with Ruff and pytest
+
+## Breaking Changes
+
+- `web_search` was renamed to `search_web`
+- The server now exposes:
+  - `search_web`
+  - `extract_url`
+  - `outline_url`
+  - `docs_qa`
+  - `find_official_docs`
+  - `resolve_doc_source`
+- Search responses are normalized for LLM consumption and are not backward
+  compatible with earlier raw answer formats
 
 ## Requirements
 
@@ -25,7 +39,7 @@ configure.
 
 ```bash
 uv python install 3.14
-uv sync
+uv sync --dev
 ```
 
 ## Configuration
@@ -35,7 +49,7 @@ Copy `.env.example` into `.env` or set environment variables directly:
 ```env
 OPENAI_API_KEY=your-api-key
 OPENAI_BASE_URL=https://api.openai.com/v1
-OPENAI_MODEL=your-search-capable-model
+OPENAI_MODEL=your-model
 OPENAI_TIMEOUT_SECONDS=60
 OPENAI_MAX_RETRIES=2
 OPENAI_ORGANIZATION=
@@ -51,9 +65,9 @@ Required variables:
 - `OPENAI_BASE_URL`
 - `OPENAI_MODEL`
 
-`mcp-searchbridge` reads `.env` for local runs, but Cursor / Claude Code MCP
-configurations do not automatically inherit that file. Pass the same values in
-the MCP `env` block when launching through an editor or client.
+`mcp-searchbridge` reads `.env` for local runs, but MCP clients such as Claude
+Code and Cursor do not automatically inherit that file. Pass the same values in
+the MCP `env` block when launching through a client.
 
 ## Run
 
@@ -63,15 +77,18 @@ uv run mcp-searchbridge
 
 This starts the MCP server on stdio.
 
-## Tool
+## Tools
 
-### `web_search`
+### `search_web`
+
+Purpose: current web discovery with normalized summaries, citations, and source
+evidence.
 
 Input:
 
 ```json
 {
-  "query": "What happened in the latest OpenAI release?",
+  "query": "latest OpenAI release notes",
   "recency": "latest",
   "max_sources": 5,
   "domain_allowlist": ["openai.com", "developers.openai.com"],
@@ -79,19 +96,19 @@ Input:
 }
 ```
 
-Output:
+Output shape:
 
 ```json
 {
   "query": {
-    "text": "What happened in the latest OpenAI release?",
+    "text": "latest OpenAI release notes",
     "recency": "latest",
     "max_sources": 5,
     "domain_allowlist": ["openai.com", "developers.openai.com"],
     "return_mode": "standard"
   },
   "summary": {
-    "text": "Short synthesis",
+    "text": "Short factual synthesis",
     "citations": [
       {
         "source_id": "source_1",
@@ -139,24 +156,178 @@ Output:
 }
 ```
 
-This response schema is intentionally LLM-oriented and breaking relative to
-earlier `answer` / `raw_text` / `sources[].snippet` outputs.
+### `extract_url`
 
-Warning semantics:
+Purpose: fetch the main body of a page as text or markdown-like content.
 
-- `no_results`: the search completed, but no matching sources were returned.
-- `provider_reported_no_live_access`: preserve this only when the upstream
-  response explicitly states that it could not browse or access the live web.
-- `sources_missing_or_unverifiable`: no verifiable sources were extracted from
-  the final normalized result.
+Input:
 
-For empty results, prefer interpreting warnings this way:
+```json
+{
+  "url": "https://example.com/docs/page",
+  "mode": "best_effort",
+  "max_chars": 12000
+}
+```
 
-- `status=empty` with `no_results`: the query ran, but nothing usable matched.
-- `status=empty` with `provider_reported_no_live_access`: the upstream model
-  explicitly claimed it could not use live web access for the request.
+Output highlights:
 
-## Claude Code / Cursor MCP config
+- `title`
+- `url`
+- `content`
+- `content_format`
+- `truncated`
+- `likely_rewritten`
+- `diagnostics`
+
+Behavior notes:
+
+- obvious 404 / not-found pages are normalized to `diagnostics.status="empty"`
+- placeholder or nav-heavy pages may be downgraded with warnings instead of being
+  treated as fully valid extracts
+
+### `outline_url`
+
+Purpose: return a compact structural outline for a page or llms.txt-like index.
+
+Input:
+
+```json
+{
+  "url": "https://example.com/llms.txt",
+  "depth": "standard"
+}
+```
+
+Output highlights:
+
+- `title`
+- `sections[]`
+- `diagnostics`
+
+Behavior notes:
+
+- normal document pages typically return `status="ok"`
+- 404 / not-found pages may still produce a shallow outline, but are downgraded
+  to `status="partial"` with `not_found_page`
+
+### `docs_qa`
+
+Purpose: answer a documentation question using a provided docs URL or official
+docs discovered by the model.
+
+Input:
+
+```json
+{
+  "question": "How do I create a chat completion?",
+  "url": "https://platform.openai.com/docs",
+  "domain_allowlist": ["openai.com", "platform.openai.com"],
+  "answer_mode": "standard"
+}
+```
+
+Output highlights:
+
+- `answer`
+- `citations[]`
+- `sources[]`
+- `diagnostics`
+
+### `find_official_docs`
+
+Purpose: resolve a topic or library name to likely canonical documentation entry
+points.
+
+Input:
+
+```json
+{
+  "query": "Pydantic",
+  "max_results": 5
+}
+```
+
+Output highlights:
+
+- `matches[]`
+- `diagnostics`
+
+### `resolve_doc_source`
+
+Purpose: classify whether an input is best handled as:
+
+- `llms_txt`
+- `page_url`
+- `library_docs_query`
+- `web_search_query`
+
+Input:
+
+```json
+{
+  "query_or_url": "https://example.com/llms.txt"
+}
+```
+
+Output highlights:
+
+- `source_type`
+- `resolved_url`
+- `confidence`
+- `rationale`
+- `diagnostics`
+
+## Diagnostics Semantics
+
+All tools return `diagnostics.status` as one of:
+
+- `ok`
+- `partial`
+- `empty`
+- `error`
+
+Search warnings currently include:
+
+- `structured_output_not_supported`
+- `structured_response_invalid`
+- `legacy_response_shape_used`
+- `text_fallback_used`
+- `url_fallback_used`
+- `summary_citations_unavailable`
+- `sources_missing_or_unverifiable`
+- `provider_reported_no_live_access`
+- `no_results`
+- `published_at_unparseable`
+
+Non-search tool warnings currently include:
+
+- `not_found_page`
+- `placeholder_page`
+- `partial_content`
+
+Warning normalization:
+
+- upstream aliases such as `no_results_found` and `no_relevant_results` are
+  normalized to `no_results`
+- upstream 404-like aliases such as `404_page`, `404_page_not_found`, and
+  `page_not_found` are normalized to `not_found_page`
+
+For empty search results:
+
+- `status=empty` with `no_results` means the request completed but nothing usable
+  matched
+- `status=empty` with `provider_reported_no_live_access` means the upstream
+  explicitly claimed it could not browse
+
+For page extraction and outline results:
+
+- `extract_url` uses `status=empty` when the target clearly looks like a 404 or
+  not-found page
+- `outline_url` uses `status=partial` when it can still summarize the page shell
+  of a 404 / placeholder page but should not present it as a healthy document
+
+## Claude Code / Cursor MCP Config
 
 For local development from this repository checkout:
 
@@ -174,7 +345,7 @@ For local development from this repository checkout:
       "env": {
         "OPENAI_API_KEY": "your-api-key",
         "OPENAI_BASE_URL": "https://api.openai.com/v1",
-        "OPENAI_MODEL": "your-search-capable-model"
+        "OPENAI_MODEL": "your-model"
       }
     }
   }
@@ -196,7 +367,7 @@ For running directly from GitHub without publishing to PyPI:
       "env": {
         "OPENAI_API_KEY": "your-api-key",
         "OPENAI_BASE_URL": "https://api.openai.com/v1",
-        "OPENAI_MODEL": "your-search-capable-model"
+        "OPENAI_MODEL": "your-model"
       }
     }
   }
@@ -207,36 +378,10 @@ Use a tag or commit SHA instead of `@main` if you want a reproducible setup.
 
 ## Development
 
-Run lint and formatting checks:
+Run checks:
 
 ```bash
 uv run ruff check .
 uv run ruff format --check .
-```
-
-Run tests:
-
-```bash
 uv run pytest
 ```
-
-Apply automatic lint fixes and formatting:
-
-```bash
-uv run ruff check --fix .
-uv run ruff format .
-```
-
-Run the package entry point directly:
-
-```bash
-uv run python -m mcp_searchbridge.server
-```
-
-## Notes
-
-- This project only guarantees OpenAI-style Chat Completions compatibility.
-- Some providers reject structured `response_format`; the server falls back to
-  plain text parsing in that case.
-- If the upstream model cannot browse the web, the tool may return a warning or
-  state that live access is unavailable.

@@ -1,27 +1,63 @@
-"""OpenAI-compatible backend implementation."""
+"""OpenAI-compatible aggregation backend implementation."""
 
 from __future__ import annotations
 
 import json
 import logging
 from typing import Any
+from urllib.parse import urlparse
 
 import openai
 from openai import OpenAI
 
 from .config import Settings
 from .errors import UpstreamSearchError
-from .models import SearchRequest, SearchResult
-from .parser import parse_search_response
-from .prompts import build_system_prompt, build_user_prompt
+from .models import (
+    Citation,
+    DocSourceResolutionRequest,
+    DocSourceResolutionRequestEcho,
+    DocSourceResolutionResult,
+    DocsQARequest,
+    DocsQARequestEcho,
+    DocsQAResult,
+    ErrorInfo,
+    ExtractRequestEcho,
+    ExtractResult,
+    ExtractUrlRequest,
+    FindOfficialDocsRequest,
+    OfficialDocMatch,
+    OfficialDocsRequestEcho,
+    OfficialDocsResult,
+    OutlineRequestEcho,
+    OutlineResult,
+    OutlineSection,
+    OutlineUrlRequest,
+    ProviderInfo,
+    SearchDiagnostics,
+    SearchRequest,
+    SearchResult,
+    SearchSource,
+    ToolDiagnostics,
+    WarningInfo,
+)
+from .parser import WARNING_MESSAGES, parse_search_response
+from .prompts import (
+    build_docs_qa_user_prompt,
+    build_extract_user_prompt,
+    build_find_official_docs_user_prompt,
+    build_outline_user_prompt,
+    build_resolve_doc_source_user_prompt,
+    build_search_user_prompt,
+    build_system_prompt,
+)
 
 LOGGER = logging.getLogger(__name__)
 
 STRUCTURED_RESPONSE_FORMAT: dict[str, Any] = {"type": "json_object"}
 
 
-class OpenAIChatSearchBackend:
-    """Bridge search requests into an OpenAI-compatible chat completion call."""
+class OpenAIAggregationBackend:
+    """Bridge multiple MCP retrieval tools into an OpenAI-compatible provider."""
 
     provider_name = "openai-compatible"
 
@@ -36,9 +72,224 @@ class OpenAIChatSearchBackend:
             max_retries=settings.openai_max_retries,
         )
 
-    def search(self, request: SearchRequest) -> SearchResult:
-        """Call the upstream provider and normalize the model response."""
+    def search_web(self, request: SearchRequest) -> SearchResult:
+        """Call the upstream provider for search/discovery."""
 
+        content, response_format_accepted, warning_codes = self._call_json_tool(
+            build_search_user_prompt(request)
+        )
+        result = parse_search_response(
+            content=content,
+            request=request,
+            provider=self.provider_name,
+            model=self.settings.openai_model,
+            response_format_requested="json_object",
+            response_format_accepted=response_format_accepted,
+        )
+        _append_warning_codes(result.diagnostics, warning_codes)
+        return result
+
+    def extract_url(self, request: ExtractUrlRequest) -> ExtractResult:
+        """Call the upstream provider for URL extraction."""
+
+        content, _, warning_codes = self._call_json_tool(
+            build_extract_user_prompt(request)
+        )
+        payload = _extract_json_payload(content)
+        title = _safe_text(payload.get("title", "")) if payload else ""
+        url = (
+            _safe_text(payload.get("url", str(request.url)))
+            if payload
+            else str(request.url)
+        )
+        body = _safe_text(payload.get("content", "")) if payload else content
+        content_format = _safe_literal(
+            payload.get("content_format") if payload else None,
+            {"text", "markdown"},
+            "text",
+        )
+        truncated = bool(payload.get("truncated", False)) if payload else False
+        likely_rewritten = (
+            bool(payload.get("likely_rewritten", True)) if payload else True
+        )
+        warning_codes.extend(
+            _collect_warning_codes(payload.get("warnings", [])) if payload else []
+        )
+        warning_codes.extend(_extract_warning_codes(body))
+        return ExtractResult(
+            request=ExtractRequestEcho(
+                url=request.url,
+                mode=request.mode,
+                max_chars=request.max_chars,
+            ),
+            title=title,
+            url=url,
+            content=body,
+            content_format=content_format,
+            truncated=truncated,
+            likely_rewritten=likely_rewritten,
+            diagnostics=_tool_diagnostics(
+                provider=self._provider_info(),
+                warning_codes=warning_codes,
+                status=_extract_status(body),
+            ),
+        )
+
+    def outline_url(self, request: OutlineUrlRequest) -> OutlineResult:
+        """Call the upstream provider for URL outline generation."""
+
+        content, _, warning_codes = self._call_json_tool(
+            build_outline_user_prompt(request)
+        )
+        body = content
+        payload = _extract_json_payload(content)
+        sections_payload = payload.get("sections", []) if payload else []
+        sections: list[OutlineSection] = []
+        if isinstance(sections_payload, list):
+            for item in sections_payload:
+                if not isinstance(item, dict):
+                    continue
+                title = _safe_text(item.get("title", ""))
+                if not title:
+                    continue
+                sections.append(
+                    OutlineSection(
+                        title=title,
+                        summary=_safe_text(item.get("summary", "")),
+                    )
+                )
+        warning_codes.extend(
+            _collect_warning_codes(payload.get("warnings", [])) if payload else []
+        )
+        warning_codes.extend(_outline_warning_codes(body, sections))
+        return OutlineResult(
+            request=OutlineRequestEcho(url=request.url, depth=request.depth),
+            title=_safe_text(payload.get("title", "")) if payload else "",
+            sections=sections,
+            diagnostics=_tool_diagnostics(
+                provider=self._provider_info(),
+                warning_codes=warning_codes,
+                status=_outline_status(
+                    title=_safe_text(payload.get("title", "")) if payload else "",
+                    sections=sections,
+                    body=content,
+                ),
+            ),
+        )
+
+    def docs_qa(self, request: DocsQARequest) -> DocsQAResult:
+        """Call the upstream provider for docs question answering."""
+
+        content, _, warning_codes = self._call_json_tool(
+            build_docs_qa_user_prompt(request)
+        )
+        payload = _extract_json_payload(content)
+        sources = _parse_sources_from_payload(
+            payload=payload,
+            domain_allowlist=request.domain_allowlist,
+        )
+        citations = _parse_citations_from_payload(payload=payload)
+        warning_codes.extend(
+            _collect_warning_codes(payload.get("warnings", [])) if payload else []
+        )
+        return DocsQAResult(
+            request=DocsQARequestEcho(
+                question=request.question,
+                url=request.url,
+                domain_allowlist=request.domain_allowlist,
+                answer_mode=request.answer_mode,
+            ),
+            answer=_safe_text(payload.get("answer", "")) if payload else content,
+            citations=citations,
+            sources=sources,
+            diagnostics=_tool_diagnostics(
+                provider=self._provider_info(),
+                warning_codes=warning_codes,
+                status="ok" if sources else "partial",
+            ),
+        )
+
+    def find_official_docs(
+        self,
+        request: FindOfficialDocsRequest,
+    ) -> OfficialDocsResult:
+        """Call the upstream provider for official docs discovery."""
+
+        content, _, warning_codes = self._call_json_tool(
+            build_find_official_docs_user_prompt(request)
+        )
+        payload = _extract_json_payload(content)
+        matches_payload = payload.get("matches", []) if payload else []
+        matches: list[OfficialDocMatch] = []
+        if isinstance(matches_payload, list):
+            for item in matches_payload[: request.max_results]:
+                if not isinstance(item, dict):
+                    continue
+                url = _safe_text(item.get("url", ""))
+                title = _safe_text(item.get("title", ""))
+                if not title or not url:
+                    continue
+                matches.append(
+                    OfficialDocMatch(
+                        title=title,
+                        url=url,
+                        domain=_domain_from_url(url),
+                        rationale=_safe_text(item.get("rationale", "")),
+                    )
+                )
+        warning_codes.extend(
+            _collect_warning_codes(payload.get("warnings", [])) if payload else []
+        )
+        return OfficialDocsResult(
+            request=OfficialDocsRequestEcho(
+                query=request.query,
+                max_results=request.max_results,
+            ),
+            matches=matches,
+            diagnostics=_tool_diagnostics(
+                provider=self._provider_info(),
+                warning_codes=warning_codes,
+                status="ok" if matches else "empty",
+            ),
+        )
+
+    def resolve_doc_source(
+        self,
+        request: DocSourceResolutionRequest,
+    ) -> DocSourceResolutionResult:
+        """Call the upstream provider for source resolution."""
+
+        content, _, warning_codes = self._call_json_tool(
+            build_resolve_doc_source_user_prompt(request)
+        )
+        payload = _extract_json_payload(content)
+        source_type = _safe_literal(
+            payload.get("source_type") if payload else None,
+            {"llms_txt", "page_url", "library_docs_query", "web_search_query"},
+            "web_search_query",
+        )
+        resolved_url = (
+            _safe_optional_url(payload.get("resolved_url")) if payload else None
+        )
+        confidence = _safe_confidence(payload.get("confidence")) if payload else 0.5
+        rationale = _safe_text(payload.get("rationale", "")) if payload else content
+        warning_codes.extend(
+            _collect_warning_codes(payload.get("warnings", [])) if payload else []
+        )
+        return DocSourceResolutionResult(
+            request=DocSourceResolutionRequestEcho(query_or_url=request.query_or_url),
+            source_type=source_type,
+            resolved_url=resolved_url,
+            confidence=confidence,
+            rationale=rationale,
+            diagnostics=_tool_diagnostics(
+                provider=self._provider_info(),
+                warning_codes=warning_codes,
+                status="ok",
+            ),
+        )
+
+    def _call_json_tool(self, user_prompt: str) -> tuple[str, bool, list[str]]:
         messages = [
             {
                 "role": "system",
@@ -46,11 +297,10 @@ class OpenAIChatSearchBackend:
                     self.settings.searchbridge_system_prompt
                 ),
             },
-            {"role": "user", "content": build_user_prompt(request)},
+            {"role": "user", "content": user_prompt},
         ]
 
-        warnings: list[str] = []
-        content = ""
+        warning_codes: list[str] = []
         response_format_accepted = True
 
         try:
@@ -59,18 +309,22 @@ class OpenAIChatSearchBackend:
                 messages=messages,
                 response_format=STRUCTURED_RESPONSE_FORMAT,
             )
-            content = _message_content(response)
+            return _message_content(response), response_format_accepted, warning_codes
         except openai.BadRequestError as exc:
             LOGGER.warning(
                 (
-                    "Structured response request rejected by upstream "
-                    "provider; retrying plain text. status=%s"
+                    "Structured response rejected by upstream provider; retrying "
+                    "plain text. status=%s"
                 ),
                 exc.status_code,
             )
-            warnings.append("structured_output_not_supported")
+            warning_codes.append("structured_output_not_supported")
             response_format_accepted = False
-            content = self._fallback_completion(messages)
+            return (
+                self._fallback_completion(messages),
+                response_format_accepted,
+                warning_codes,
+            )
         except (
             openai.APIConnectionError,
             openai.APITimeoutError,
@@ -81,23 +335,6 @@ class OpenAIChatSearchBackend:
             raise UpstreamSearchError(_format_api_error(exc)) from exc
         except openai.OpenAIError as exc:
             raise UpstreamSearchError(str(exc)) from exc
-
-        result = parse_search_response(
-            content=content,
-            request=request,
-            provider=self.provider_name,
-            model=self.settings.openai_model,
-            response_format_requested="json_object",
-            response_format_accepted=response_format_accepted,
-        )
-        if warnings:
-            existing_codes = {item.code for item in result.diagnostics.warnings}
-            for code in warnings:
-                if code not in existing_codes:
-                    result.diagnostics.warnings.append(
-                        _warning_info(code=code)
-                    )
-        return result
 
     def _fallback_completion(self, messages: list[dict[str, str]]) -> str:
         try:
@@ -116,6 +353,9 @@ class OpenAIChatSearchBackend:
             raise UpstreamSearchError(_format_api_error(exc)) from exc
         except openai.OpenAIError as exc:
             raise UpstreamSearchError(str(exc)) from exc
+
+    def _provider_info(self) -> ProviderInfo:
+        return ProviderInfo(name=self.provider_name, model=self.settings.openai_model)
 
 
 def _message_content(response: Any) -> str:
@@ -185,6 +425,256 @@ def _content_from_sse_response(response: str) -> str:
     return "".join(content_parts).strip()
 
 
+def _extract_json_payload(content: str) -> dict[str, object] | None:
+    text = content.strip()
+    if not text:
+        return None
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _parse_sources_from_payload(
+    *,
+    payload: dict[str, object] | None,
+    domain_allowlist: list[str],
+) -> list[SearchSource]:
+    if not payload:
+        return []
+    raw_sources = payload.get("sources", [])
+    if not isinstance(raw_sources, list):
+        return []
+
+    sources: list[SearchSource] = []
+    for index, item in enumerate(raw_sources, start=1):
+        if not isinstance(item, dict):
+            continue
+        title = _safe_text(item.get("title", ""))
+        url = _safe_text(item.get("url", ""))
+        if not title or not url:
+            continue
+        evidence = []
+        raw_evidence = item.get("evidence", [])
+        if isinstance(raw_evidence, list):
+            for evidence_index, raw_chunk in enumerate(raw_evidence, start=1):
+                if not isinstance(raw_chunk, dict):
+                    continue
+                text = _safe_text(raw_chunk.get("text", ""))
+                if not text:
+                    continue
+                chunk_id = _safe_text(raw_chunk.get("chunk_id", "")) or (
+                    f"source_{index}_chunk_{evidence_index}"
+                )
+                evidence.append({"chunk_id": chunk_id, "text": text})
+        sources.append(
+            SearchSource(
+                source_id=_safe_text(item.get("source_id", "")) or f"source_{index}",
+                rank=index,
+                title=title,
+                url=url,
+                domain=_domain_from_url(url),
+                published_at=_safe_optional_text(item.get("published_at")),
+                domain_allowed=_domain_allowed(
+                    domain=_domain_from_url(url),
+                    allowlist=domain_allowlist,
+                ),
+                evidence=evidence,
+            )
+        )
+    return sources
+
+
+def _parse_citations_from_payload(payload: dict[str, object] | None) -> list[Citation]:
+    if not payload:
+        return []
+    raw_citations = payload.get("citations", [])
+    if not isinstance(raw_citations, list):
+        return []
+    citations: list[Citation] = []
+    for item in raw_citations:
+        if not isinstance(item, dict):
+            continue
+        source_id = _safe_text(item.get("source_id", ""))
+        chunk_id = _safe_text(item.get("chunk_id", ""))
+        if source_id and chunk_id:
+            citations.append(Citation(source_id=source_id, chunk_id=chunk_id))
+    return citations
+
+
+def _collect_warning_codes(raw_warnings: object) -> list[str]:
+    if not isinstance(raw_warnings, list):
+        return []
+    codes: list[str] = []
+    for item in raw_warnings:
+        code = _normalize_warning_code(str(item).strip())
+        if code:
+            codes.append(code)
+    return codes
+
+
+def _append_warning_codes(
+    diagnostics: ToolDiagnostics | SearchDiagnostics,
+    warning_codes: list[str],
+) -> None:
+    existing = {item.code for item in diagnostics.warnings}
+    for code in warning_codes:
+        if code in existing:
+            continue
+        diagnostics.warnings.append(
+            WarningInfo(code=code, message=WARNING_MESSAGES.get(code, code))
+        )
+        existing.add(code)
+
+
+def _tool_diagnostics(
+    *,
+    provider: ProviderInfo,
+    warning_codes: list[str],
+    status: str,
+    error: ErrorInfo | None = None,
+) -> ToolDiagnostics:
+    warnings = [
+        WarningInfo(code=code, message=WARNING_MESSAGES.get(code, code))
+        for code in _dedupe_warning_codes(warning_codes)
+    ]
+    return ToolDiagnostics(
+        status=status,
+        provider=provider,
+        warnings=warnings,
+        error=error,
+    )
+
+
+def _dedupe_warning_codes(codes: list[str]) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for code in codes:
+        if code and code not in seen:
+            seen.add(code)
+            merged.append(code)
+    return merged
+
+
+def _domain_from_url(url: str) -> str:
+    return urlparse(url).netloc.lower()
+
+
+def _domain_allowed(*, domain: str, allowlist: list[str]) -> bool:
+    if not allowlist:
+        return True
+    normalized_allowlist = [item.lower() for item in allowlist]
+    for allowed in normalized_allowlist:
+        if domain == allowed or domain.endswith(f".{allowed}"):
+            return True
+    return False
+
+
+def _status_from_body(body: str) -> str:
+    return "ok" if body.strip() else "empty"
+
+
+def _extract_status(body: str) -> str:
+    text = body.strip()
+    if not text:
+        return "empty"
+    if _looks_like_not_found_page(text):
+        return "empty"
+    if _looks_like_placeholder_page(text):
+        return "partial"
+    return "ok"
+
+
+def _extract_warning_codes(body: str) -> list[str]:
+    if not body.strip():
+        return []
+    if _looks_like_not_found_page(body):
+        return ["not_found_page"]
+    if _looks_like_placeholder_page(body):
+        return ["placeholder_page"]
+    return []
+
+
+def _outline_warning_codes(body: str, sections: list[OutlineSection]) -> list[str]:
+    if not body.strip():
+        return []
+    if _looks_like_not_found_page(body):
+        return ["not_found_page"]
+    if _looks_like_placeholder_page(body):
+        return ["placeholder_page"]
+    if sections and not _extract_title_is_confident(body):
+        return ["partial_content"]
+    return []
+
+
+def _outline_status(*, title: str, sections: list[OutlineSection], body: str) -> str:
+    if not sections:
+        return "empty"
+    if _looks_like_not_found_page(body) or _looks_like_placeholder_page(body):
+        return "partial"
+    if not title.strip():
+        return "partial"
+    return "ok"
+
+
+def _looks_like_not_found_page(text: str) -> bool:
+    lowered = text.lower()
+    markers = (
+        "404 - page not found",
+        "page not found",
+        "sorry, this page cannot be found",
+        "the page you are looking for cannot be found",
+        "404 not found",
+    )
+    return any(marker in lowered for marker in markers)
+
+
+def _looks_like_placeholder_page(text: str) -> bool:
+    lowered = text.lower()
+    markers = (
+        "click to expand",
+        "table of contents",
+        "loading...",
+        "please enable javascript",
+        "you need to enable javascript",
+        "subscribe",
+    )
+    return any(marker in lowered for marker in markers) and len(text) < 4000
+
+
+def _extract_title_is_confident(body: str) -> bool:
+    lowered = body.lower()
+    return "404 - page not found" not in lowered and "page not found" not in lowered
+
+
+def _safe_text(value: object) -> str:
+    return str(value).strip() if value is not None else ""
+
+
+def _safe_optional_text(value: object) -> str | None:
+    text = _safe_text(value)
+    return text or None
+
+
+def _safe_optional_url(value: object) -> str | None:
+    text = _safe_text(value)
+    return text or None
+
+
+def _safe_literal(value: object, allowed: set[str], default: str) -> str:
+    candidate = _safe_text(value)
+    return candidate if candidate in allowed else default
+
+
+def _safe_confidence(value: object) -> float:
+    try:
+        number = float(value)
+    except TypeError, ValueError:
+        return 0.5
+    return min(1.0, max(0.0, number))
+
+
 def _format_api_error(exc: Exception) -> str:
     if isinstance(exc, openai.AuthenticationError):
         return "Authentication with the upstream provider failed."
@@ -199,19 +689,11 @@ def _format_api_error(exc: Exception) -> str:
     return str(exc)
 
 
-def _merge_warnings(*warning_groups: list[str]) -> list[str]:
-    merged: list[str] = []
-    seen: set[str] = set()
-    for group in warning_groups:
-        for item in group:
-            if item and item not in seen:
-                merged.append(item)
-                seen.add(item)
-    return merged
-
-
-def _warning_info(code: str):
-    from .models import WarningInfo
-    from .parser import WARNING_MESSAGES
-
-    return WarningInfo(code=code, message=WARNING_MESSAGES.get(code, code))
+def _normalize_warning_code(code: str) -> str:
+    aliases = {
+        "no_results_found": "no_results",
+        "404_page": "not_found_page",
+        "404_page_not_found": "not_found_page",
+        "page_not_found": "not_found_page",
+    }
+    return aliases.get(code, code)

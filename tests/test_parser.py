@@ -229,6 +229,55 @@ def test_empty_results_without_live_access_claim_use_no_results_warning() -> Non
     assert "provider_reported_no_live_access" not in warning_codes
 
 
+def test_empty_results_normalize_no_results_found_alias() -> None:
+    content = """
+    {
+      "summary": {
+        "text": "No information found for this query."
+      },
+      "sources": [],
+      "warnings": ["no_results_found"]
+    }
+    """
+
+    result = parse_search_response(
+        content=content,
+        request=_request(),
+        provider="openai-compatible",
+        model="test-model",
+    )
+
+    warning_codes = _warning_codes(result)
+    assert result.diagnostics.status == "empty"
+    assert "no_results" in warning_codes
+    assert "no_results_found" not in warning_codes
+    assert "sources_missing_or_unverifiable" in warning_codes
+
+
+def test_empty_results_normalize_no_relevant_results_alias() -> None:
+    content = """
+    {
+      "summary": {
+        "text": "No relevant results were found for this query."
+      },
+      "sources": [],
+      "warnings": ["no_relevant_results"]
+    }
+    """
+
+    result = parse_search_response(
+        content=content,
+        request=_request(),
+        provider="openai-compatible",
+        model="test-model",
+    )
+
+    warning_codes = _warning_codes(result)
+    assert result.diagnostics.status == "empty"
+    assert "no_results" in warning_codes
+    assert "no_relevant_results" not in warning_codes
+
+
 def test_explicit_no_live_access_claim_preserves_warning() -> None:
     content = """
     {
