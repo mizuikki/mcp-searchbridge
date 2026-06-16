@@ -4,6 +4,8 @@ import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import httpx
+import openai
 import pytest
 
 from mcp_searchbridge.config import Settings
@@ -408,13 +410,60 @@ def test_backend_does_not_fallback_for_unrelated_bad_request() -> None:
         )
         backend = OpenAIAggregationBackend(settings)
 
-        with pytest.raises(UpstreamSearchError, match="HTTP 400"):
+        with pytest.raises(UpstreamSearchError) as exc_info:
             backend.search_web(SearchRequest(query="bad request test"))
+
+        exc = exc_info.value
+        assert exc.client_message == "The upstream provider rejected the request."
+        assert exc.retryable is False
+        assert exc.log_context.error_type == "BadRequestError"
+        assert "http://" not in exc.client_message
+        assert "127.0.0.1" not in exc.client_message
 
         assert _GenericBadRequestHandler.request_count == 1
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_backend_connection_errors_are_sanitized() -> None:
+    class _FailingChatCompletions:
+        def create(self, **_: object) -> object:
+            request = httpx.Request(
+                "POST",
+                "http://192.168.5.1:23000/v1/chat/completions",
+            )
+            raise openai.APIConnectionError(
+                message="dial tcp 192.168.5.1:23000: connect: connection refused",
+                request=request,
+            )
+
+    class _FailingClient:
+        def __init__(self) -> None:
+            self.chat = type(
+                "ChatNamespace",
+                (),
+                {"completions": _FailingChatCompletions()},
+            )()
+
+    settings = Settings(
+        _env_file=None,
+        OPENAI_API_KEY="test-key",
+        OPENAI_BASE_URL="http://192.168.5.1:23000/v1",
+        OPENAI_MODEL="fake-search-model",
+    )
+    backend = OpenAIAggregationBackend(settings, client=_FailingClient())
+
+    with pytest.raises(UpstreamSearchError) as exc_info:
+        backend.search_web(SearchRequest(query="connection test"))
+
+    exc = exc_info.value
+    assert exc.client_message == "Could not connect to the upstream provider."
+    assert exc.retryable is True
+    assert exc.log_context.error_type == "APIConnectionError"
+    assert "192.168.5.1" not in exc.client_message
+    assert "23000" not in exc.client_message
+    assert "http://" not in exc.client_message
 
 
 def test_backend_marks_404_like_pages_as_empty_or_partial() -> None:

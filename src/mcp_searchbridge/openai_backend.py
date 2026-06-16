@@ -12,7 +12,7 @@ import openai
 from openai import OpenAI
 
 from .config import Settings
-from .errors import UpstreamSearchError
+from .errors import UpstreamLogContext, UpstreamSearchError
 from .models import (
     Citation,
     DocSourceResolutionRequest,
@@ -325,7 +325,7 @@ class OpenAIAggregationBackend:
             return _message_content(response), response_format_accepted, warning_codes
         except openai.BadRequestError as exc:
             if not _is_structured_output_unsupported_error(exc):
-                raise UpstreamSearchError(_format_api_error(exc)) from exc
+                raise _build_upstream_error(exc) from exc
 
             LOGGER.warning(
                 "Structured response rejected by upstream provider; retrying "
@@ -346,9 +346,9 @@ class OpenAIAggregationBackend:
             openai.RateLimitError,
             openai.APIStatusError,
         ) as exc:
-            raise UpstreamSearchError(_format_api_error(exc)) from exc
+            raise _build_upstream_error(exc) from exc
         except openai.OpenAIError as exc:
-            raise UpstreamSearchError(str(exc)) from exc
+            raise _build_upstream_error(exc) from exc
 
     def _fallback_completion(self, messages: list[dict[str, str]]) -> str:
         try:
@@ -364,9 +364,9 @@ class OpenAIAggregationBackend:
             openai.RateLimitError,
             openai.APIStatusError,
         ) as exc:
-            raise UpstreamSearchError(_format_api_error(exc)) from exc
+            raise _build_upstream_error(exc) from exc
         except openai.OpenAIError as exc:
-            raise UpstreamSearchError(str(exc)) from exc
+            raise _build_upstream_error(exc) from exc
 
     def _provider_info(self) -> ProviderInfo:
         return ProviderInfo(name=self.provider_name, model=self.settings.openai_model)
@@ -717,17 +717,68 @@ def _safe_confidence(value: object) -> float:
 
 
 def _format_api_error(exc: Exception) -> str:
+    return _build_upstream_error(exc).client_message
+
+
+def _build_upstream_error(exc: Exception) -> UpstreamSearchError:
     if isinstance(exc, openai.AuthenticationError):
-        return "Authentication with the upstream provider failed."
+        return UpstreamSearchError(
+            "Authentication with the upstream provider failed.",
+            retryable=False,
+            log_context=_upstream_log_context(exc),
+        )
     if isinstance(exc, openai.RateLimitError):
-        return "The upstream provider rate-limited the request."
+        return UpstreamSearchError(
+            "The upstream provider rate-limited the request.",
+            retryable=True,
+            log_context=_upstream_log_context(exc),
+        )
     if isinstance(exc, openai.APITimeoutError):
-        return "The upstream provider request timed out."
+        return UpstreamSearchError(
+            "The upstream provider request timed out.",
+            retryable=True,
+            log_context=_upstream_log_context(exc),
+        )
     if isinstance(exc, openai.APIConnectionError):
-        return f"Could not connect to the upstream provider: {exc}"
+        return UpstreamSearchError(
+            "Could not connect to the upstream provider.",
+            retryable=True,
+            log_context=_upstream_log_context(exc),
+        )
+    if isinstance(exc, openai.BadRequestError):
+        return UpstreamSearchError(
+            "The upstream provider rejected the request.",
+            retryable=False,
+            log_context=_upstream_log_context(exc),
+        )
     if isinstance(exc, openai.APIStatusError):
-        return f"Upstream provider returned HTTP {exc.status_code}."
-    return str(exc)
+        return UpstreamSearchError(
+            f"Upstream provider returned HTTP {exc.status_code}.",
+            retryable=500 <= exc.status_code < 600,
+            log_context=_upstream_log_context(exc),
+        )
+    if isinstance(exc, openai.OpenAIError):
+        return UpstreamSearchError(
+            "The upstream provider request failed.",
+            retryable=False,
+            log_context=_upstream_log_context(exc),
+        )
+
+    return UpstreamSearchError(
+        "The upstream provider request failed.",
+        retryable=False,
+        log_context=UpstreamLogContext(error_type=type(exc).__name__),
+    )
+
+
+def _upstream_log_context(exc: Exception) -> UpstreamLogContext:
+    status_code = exc.status_code if isinstance(exc, openai.APIStatusError) else None
+    request_id = exc.request_id if isinstance(exc, openai.APIStatusError) else None
+    return UpstreamLogContext(
+        error_type=type(exc).__name__,
+        status_code=status_code,
+        request_id=request_id,
+    )
 
 
 def _normalize_warning_code(code: str) -> str:

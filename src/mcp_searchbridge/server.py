@@ -37,6 +37,8 @@ from .models import (
 )
 from .openai_backend import OpenAIAggregationBackend
 
+LOGGER = logging.getLogger(__name__)
+
 
 def create_server(
     settings: Settings | None = None,
@@ -85,7 +87,7 @@ def create_server(
             )
             return aggregation_backend.search_web(request)
         except ValidationError as exc:
-            logging.getLogger(__name__).error("search_web validation failed: %s", exc)
+            LOGGER.error("search_web validation failed: %s", exc)
             return _search_error_result(
                 query=query,
                 recency=recency,
@@ -103,7 +105,7 @@ def create_server(
                 retryable=False,
             )
         except UpstreamSearchError as exc:
-            logging.getLogger(__name__).error("search_web upstream failure: %s", exc)
+            _log_upstream_failure("search_web", exc)
             return _search_error_result(
                 query=query,
                 recency=recency,
@@ -117,11 +119,11 @@ def create_server(
                 provider=aggregation_backend.provider_name,
                 model=active_settings.openai_model,
                 code="upstream_request_failed",
-                message=f"Upstream search request failed: {exc}",
-                retryable=True,
+                message=exc.client_message,
+                retryable=exc.retryable,
             )
         except SearchBridgeError as exc:
-            logging.getLogger(__name__).error("search_web failed: %s", exc)
+            LOGGER.error("search_web failed: %s", exc)
             return _search_error_result(
                 query=query,
                 recency=recency,
@@ -147,12 +149,12 @@ def create_server(
         url: str,
         mode: Literal["body", "markdown", "best_effort"] = "best_effort",
         max_chars: int = 12000,
-    ) -> ExtractResult:
+        ) -> ExtractResult:
         try:
             request = ExtractUrlRequest(url=url, mode=mode, max_chars=max_chars)
             return aggregation_backend.extract_url(request)
         except ValidationError as exc:
-            logging.getLogger(__name__).error("extract_url validation failed: %s", exc)
+            LOGGER.error("extract_url validation failed: %s", exc)
             return _extract_error_result(
                 url=url,
                 mode=mode,
@@ -163,6 +165,18 @@ def create_server(
                 message=f"Invalid extract request: {exc}",
                 retryable=False,
             )
+        except UpstreamSearchError as exc:
+            _log_upstream_failure("extract_url", exc)
+            return _extract_error_result(
+                url=url,
+                mode=mode,
+                max_chars=max_chars,
+                provider=aggregation_backend.provider_name,
+                model=active_settings.openai_model,
+                code="upstream_request_failed",
+                message=exc.client_message,
+                retryable=exc.retryable,
+            )
 
     @mcp.tool(
         name="outline_url",
@@ -171,12 +185,12 @@ def create_server(
     def outline_url(
         url: str,
         depth: Literal["shallow", "standard", "deep"] = "standard",
-    ) -> OutlineResult:
+        ) -> OutlineResult:
         try:
             request = OutlineUrlRequest(url=url, depth=depth)
             return aggregation_backend.outline_url(request)
         except ValidationError as exc:
-            logging.getLogger(__name__).error("outline_url validation failed: %s", exc)
+            LOGGER.error("outline_url validation failed: %s", exc)
             return _outline_error_result(
                 url=url,
                 depth=depth,
@@ -185,6 +199,17 @@ def create_server(
                 code="invalid_request",
                 message=f"Invalid outline request: {exc}",
                 retryable=False,
+            )
+        except UpstreamSearchError as exc:
+            _log_upstream_failure("outline_url", exc)
+            return _outline_error_result(
+                url=url,
+                depth=depth,
+                provider=aggregation_backend.provider_name,
+                model=active_settings.openai_model,
+                code="upstream_request_failed",
+                message=exc.client_message,
+                retryable=exc.retryable,
             )
 
     @mcp.tool(
@@ -196,7 +221,7 @@ def create_server(
         url: str | None = None,
         domain_allowlist: list[str] | None = None,
         answer_mode: Literal["concise", "standard"] = "standard",
-    ) -> DocsQAResult:
+        ) -> DocsQAResult:
         try:
             request = DocsQARequest(
                 question=question,
@@ -206,7 +231,7 @@ def create_server(
             )
             return aggregation_backend.docs_qa(request)
         except ValidationError as exc:
-            logging.getLogger(__name__).error("docs_qa validation failed: %s", exc)
+            LOGGER.error("docs_qa validation failed: %s", exc)
             return _docs_qa_error_result(
                 question=question,
                 url=url,
@@ -218,6 +243,19 @@ def create_server(
                 message=f"Invalid docs QA request: {exc}",
                 retryable=False,
             )
+        except UpstreamSearchError as exc:
+            _log_upstream_failure("docs_qa", exc)
+            return _docs_qa_error_result(
+                question=question,
+                url=url,
+                domain_allowlist=domain_allowlist or [],
+                answer_mode=answer_mode,
+                provider=aggregation_backend.provider_name,
+                model=active_settings.openai_model,
+                code="upstream_request_failed",
+                message=exc.client_message,
+                retryable=exc.retryable,
+            )
 
     @mcp.tool(
         name="find_official_docs",
@@ -228,10 +266,7 @@ def create_server(
             request = FindOfficialDocsRequest(query=query, max_results=max_results)
             return aggregation_backend.find_official_docs(request)
         except ValidationError as exc:
-            logging.getLogger(__name__).error(
-                "find_official_docs validation failed: %s",
-                exc,
-            )
+            LOGGER.error("find_official_docs validation failed: %s", exc)
             return _official_docs_error_result(
                 query=query,
                 max_results=max_results,
@@ -240,6 +275,17 @@ def create_server(
                 code="invalid_request",
                 message=f"Invalid official docs request: {exc}",
                 retryable=False,
+            )
+        except UpstreamSearchError as exc:
+            _log_upstream_failure("find_official_docs", exc)
+            return _official_docs_error_result(
+                query=query,
+                max_results=max_results,
+                provider=aggregation_backend.provider_name,
+                model=active_settings.openai_model,
+                code="upstream_request_failed",
+                message=exc.client_message,
+                retryable=exc.retryable,
             )
 
     @mcp.tool(
@@ -254,10 +300,7 @@ def create_server(
             request = DocSourceResolutionRequest(query_or_url=query_or_url)
             return aggregation_backend.resolve_doc_source(request)
         except ValidationError as exc:
-            logging.getLogger(__name__).error(
-                "resolve_doc_source validation failed: %s",
-                exc,
-            )
+            LOGGER.error("resolve_doc_source validation failed: %s", exc)
             return _resolve_source_error_result(
                 query_or_url=query_or_url,
                 provider=aggregation_backend.provider_name,
@@ -265,6 +308,16 @@ def create_server(
                 code="invalid_request",
                 message=f"Invalid source resolution request: {exc}",
                 retryable=False,
+            )
+        except UpstreamSearchError as exc:
+            _log_upstream_failure("resolve_doc_source", exc)
+            return _resolve_source_error_result(
+                query_or_url=query_or_url,
+                provider=aggregation_backend.provider_name,
+                model=active_settings.openai_model,
+                code="upstream_request_failed",
+                message=exc.client_message,
+                retryable=exc.retryable,
             )
 
     return mcp
@@ -286,6 +339,18 @@ def _configure_logging(level: str) -> None:
 
 def _provider_info(provider: str, model: str) -> ProviderInfo:
     return ProviderInfo(name=provider, model=model)
+
+
+def _log_upstream_failure(tool_name: str, exc: UpstreamSearchError) -> None:
+    context = exc.log_context
+    LOGGER.warning(
+        "%s upstream failure [error_type=%s status_code=%s request_id=%s retryable=%s]",
+        tool_name,
+        context.error_type,
+        context.status_code,
+        context.request_id,
+        exc.retryable,
+    )
 
 
 def _search_error_result(
