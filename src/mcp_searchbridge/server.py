@@ -149,7 +149,7 @@ def create_server(
         url: str,
         mode: Literal["body", "markdown", "best_effort"] = "best_effort",
         max_chars: int = 12000,
-        ) -> ExtractResult:
+    ) -> ExtractResult:
         try:
             request = ExtractUrlRequest(url=url, mode=mode, max_chars=max_chars)
             return aggregation_backend.extract_url(request)
@@ -185,7 +185,7 @@ def create_server(
     def outline_url(
         url: str,
         depth: Literal["shallow", "standard", "deep"] = "standard",
-        ) -> OutlineResult:
+    ) -> OutlineResult:
         try:
             request = OutlineUrlRequest(url=url, depth=depth)
             return aggregation_backend.outline_url(request)
@@ -221,7 +221,7 @@ def create_server(
         url: str | None = None,
         domain_allowlist: list[str] | None = None,
         answer_mode: Literal["concise", "standard"] = "standard",
-        ) -> DocsQAResult:
+    ) -> DocsQAResult:
         try:
             request = DocsQARequest(
                 question=question,
