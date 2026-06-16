@@ -4,7 +4,10 @@ import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import pytest
+
 from mcp_searchbridge.config import Settings
+from mcp_searchbridge.errors import UpstreamSearchError
 from mcp_searchbridge.models import ExtractUrlRequest, SearchRequest
 from mcp_searchbridge.openai_backend import OpenAIAggregationBackend
 
@@ -230,6 +233,37 @@ class _FallbackChatCompletionsHandler(BaseHTTPRequestHandler):
         return
 
 
+class _GenericBadRequestHandler(BaseHTTPRequestHandler):
+    request_count = 0
+
+    def do_POST(self) -> None:  # noqa: N802
+        if self.path != "/v1/chat/completions":
+            self.send_response(404)
+            self.end_headers()
+            return
+
+        type(self).request_count += 1
+        length = int(self.headers["Content-Length"])
+        payload = json.loads(self.rfile.read(length).decode("utf-8"))
+
+        self.send_response(400)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(
+            json.dumps(
+                {
+                    "error": {
+                        "message": f"model '{payload['model']}' is invalid",
+                        "type": "invalid_request_error",
+                    }
+                }
+            ).encode("utf-8")
+        )
+
+    def log_message(self, format: str, *args: object) -> None:  # noqa: A003
+        return
+
+
 def test_backend_search_against_fake_openai_endpoint() -> None:
     server = ThreadingHTTPServer(("127.0.0.1", 0), _ChatCompletionsHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -324,6 +358,60 @@ def test_backend_falls_back_when_structured_output_is_rejected() -> None:
         assert "text_fallback_used" in warning_codes
         assert result.diagnostics.normalization.response_format_accepted is False
         assert _FallbackChatCompletionsHandler.request_count == 2
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_backend_skips_structured_output_after_capability_is_cached() -> None:
+    _FallbackChatCompletionsHandler.request_count = 0
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _FallbackChatCompletionsHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        host, port = server.server_address
+        settings = Settings(
+            _env_file=None,
+            OPENAI_API_KEY="test-key",
+            OPENAI_BASE_URL=f"http://{host}:{port}/v1",
+            OPENAI_MODEL="fake-search-model",
+        )
+        backend = OpenAIAggregationBackend(settings)
+
+        first = backend.search_web(SearchRequest(query="first fallback test"))
+        second = backend.search_web(SearchRequest(query="second fallback test"))
+
+        assert first.summary.text == "Fallback answer"
+        assert second.summary.text == "Fallback answer"
+        assert _FallbackChatCompletionsHandler.request_count == 3
+        assert first.diagnostics.normalization.response_format_accepted is False
+        assert second.diagnostics.normalization.response_format_accepted is False
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_backend_does_not_fallback_for_unrelated_bad_request() -> None:
+    _GenericBadRequestHandler.request_count = 0
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _GenericBadRequestHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        host, port = server.server_address
+        settings = Settings(
+            _env_file=None,
+            OPENAI_API_KEY="test-key",
+            OPENAI_BASE_URL=f"http://{host}:{port}/v1",
+            OPENAI_MODEL="fake-search-model",
+        )
+        backend = OpenAIAggregationBackend(settings)
+
+        with pytest.raises(UpstreamSearchError, match="HTTP 400"):
+            backend.search_web(SearchRequest(query="bad request test"))
+
+        assert _GenericBadRequestHandler.request_count == 1
     finally:
         server.shutdown()
         server.server_close()

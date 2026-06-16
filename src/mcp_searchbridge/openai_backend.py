@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from typing import Any
 from urllib.parse import urlparse
 
@@ -54,6 +55,8 @@ from .prompts import (
 LOGGER = logging.getLogger(__name__)
 
 STRUCTURED_RESPONSE_FORMAT: dict[str, Any] = {"type": "json_object"}
+_STRUCTURED_OUTPUT_CACHE_LOCK = threading.Lock()
+_STRUCTURED_OUTPUT_UNSUPPORTED_CACHE: dict[tuple[str, str], bool] = {}
 
 
 class OpenAIAggregationBackend:
@@ -70,6 +73,10 @@ class OpenAIAggregationBackend:
             project=settings.openai_project,
             timeout=settings.openai_timeout_seconds,
             max_retries=settings.openai_max_retries,
+        )
+        self._structured_output_cache_key = (
+            str(settings.openai_base_url),
+            settings.openai_model,
         )
 
     def search_web(self, request: SearchRequest) -> SearchResult:
@@ -302,24 +309,31 @@ class OpenAIAggregationBackend:
 
         warning_codes: list[str] = []
         response_format_accepted = True
+        structured_output_supported = self._structured_output_supported()
 
         try:
-            response = self.client.chat.completions.create(
-                model=self.settings.openai_model,
-                messages=messages,
-                response_format=STRUCTURED_RESPONSE_FORMAT,
-            )
+            if structured_output_supported:
+                response = self.client.chat.completions.create(
+                    model=self.settings.openai_model,
+                    messages=messages,
+                    response_format=STRUCTURED_RESPONSE_FORMAT,
+                )
+            else:
+                response_format_accepted = False
+                warning_codes.append("structured_output_not_supported")
+                response = self._fallback_completion(messages)
             return _message_content(response), response_format_accepted, warning_codes
         except openai.BadRequestError as exc:
+            if not _is_structured_output_unsupported_error(exc):
+                raise UpstreamSearchError(_format_api_error(exc)) from exc
+
             LOGGER.warning(
-                (
-                    "Structured response rejected by upstream provider; retrying "
-                    "plain text. status=%s"
-                ),
-                exc.status_code,
+                "Structured response rejected by upstream provider; retrying "
+                "plain text."
             )
             warning_codes.append("structured_output_not_supported")
             response_format_accepted = False
+            _mark_structured_output_unsupported(self._structured_output_cache_key)
             return (
                 self._fallback_completion(messages),
                 response_format_accepted,
@@ -357,6 +371,11 @@ class OpenAIAggregationBackend:
     def _provider_info(self) -> ProviderInfo:
         return ProviderInfo(name=self.provider_name, model=self.settings.openai_model)
 
+    def _structured_output_supported(self) -> bool:
+        return not _structured_output_unsupported_cached(
+            self._structured_output_cache_key
+        )
+
 
 def _message_content(response: Any) -> str:
     if isinstance(response, str):
@@ -376,6 +395,28 @@ def _message_content(response: Any) -> str:
     if isinstance(content, str) and content.strip():
         return content
     raise UpstreamSearchError("Upstream response message content was empty.")
+
+
+def _structured_output_unsupported_cached(cache_key: tuple[str, str]) -> bool:
+    with _STRUCTURED_OUTPUT_CACHE_LOCK:
+        return _STRUCTURED_OUTPUT_UNSUPPORTED_CACHE.get(cache_key, False)
+
+
+def _mark_structured_output_unsupported(cache_key: tuple[str, str]) -> None:
+    with _STRUCTURED_OUTPUT_CACHE_LOCK:
+        _STRUCTURED_OUTPUT_UNSUPPORTED_CACHE[cache_key] = True
+
+
+def _is_structured_output_unsupported_error(exc: openai.BadRequestError) -> bool:
+    body = exc.body
+    if not isinstance(body, dict):
+        return False
+
+    error_message = _safe_text(body.get("message", "")).lower()
+    error_type = _safe_text(body.get("type", "")).lower()
+    if "response_format" not in error_message and "structured" not in error_message:
+        return False
+    return error_type == "invalid_request_error"
 
 
 def _content_from_string_response(response: str) -> str:
