@@ -50,7 +50,7 @@ Copy `.env.example` into `.env` or set environment variables directly:
 OPENAI_API_KEY=your-api-key
 OPENAI_BASE_URL=https://api.openai.com/v1
 OPENAI_MODEL=your-model
-OPENAI_TIMEOUT_SECONDS=60
+OPENAI_TIMEOUT_SECONDS=180
 OPENAI_MAX_RETRIES=2
 OPENAI_ORGANIZATION=
 OPENAI_PROJECT=

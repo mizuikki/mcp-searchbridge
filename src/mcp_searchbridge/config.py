@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     openai_base_url: HttpUrl = Field(alias="OPENAI_BASE_URL")
     openai_model: str = Field(alias="OPENAI_MODEL", min_length=1)
     openai_timeout_seconds: float = Field(
-        default=60.0,
+        default=180.0,
         alias="OPENAI_TIMEOUT_SECONDS",
         gt=0,
     )
