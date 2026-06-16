@@ -22,6 +22,7 @@ from .models import (
     Summary,
     WarningInfo,
 )
+from .type_utils import ParseMode, ToolStatus, parse_http_url
 
 JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 URL_RE = re.compile(r"https?://[^\s<>\"]+")
@@ -502,7 +503,7 @@ def _build_source(
         source_id=source_id,
         rank=rank,
         title=title,
-        url=url,
+        url=parse_http_url(url),
         domain=domain,
         published_at=published_at,
         domain_allowed=_domain_allowed(
@@ -627,7 +628,7 @@ def _build_result(
     model: str,
     summary: Summary,
     sources: list[SearchSource],
-    parse_mode: str,
+    parse_mode: ParseMode,
     response_format_requested: str,
     response_format_accepted: bool,
     warning_codes: list[str],
@@ -647,6 +648,7 @@ def _build_result(
     evidence_chunks_returned = sum(len(source.evidence) for source in sources)
     sources_with_evidence = sum(1 for source in sources if source.evidence)
 
+    status: ToolStatus
     if not sources:
         status = "empty"
     elif parse_mode in {"structured_v2", "structured_legacy"} and sources_with_evidence:

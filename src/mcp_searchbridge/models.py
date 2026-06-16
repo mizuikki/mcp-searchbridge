@@ -6,6 +6,17 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, HttpUrl, field_validator
 
+from .type_utils import (
+    ContentFormat,
+    DocsAnswerMode,
+    DocSourceType,
+    ExtractMode,
+    OutlineDepth,
+    ParseMode,
+    ReturnMode,
+    ToolStatus,
+)
+
 
 class BaseToolRequest(BaseModel):
     """Base request model with shared text normalization."""
@@ -43,7 +54,7 @@ class SearchRequest(BaseToolRequest):
         default_factory=list,
         description="Preferred or restricted source domains.",
     )
-    return_mode: Literal["concise", "standard"] = Field(
+    return_mode: ReturnMode = Field(
         default="standard",
         description="Controls answer brevity.",
     )
@@ -73,7 +84,7 @@ class ExtractUrlRequest(BaseToolRequest):
     """Request for URL extraction."""
 
     url: HttpUrl
-    mode: Literal["body", "markdown", "best_effort"] = "best_effort"
+    mode: ExtractMode = "best_effort"
     max_chars: int = Field(default=12000, ge=200, le=100000)
 
 
@@ -81,7 +92,7 @@ class OutlineUrlRequest(BaseToolRequest):
     """Request for URL outline generation."""
 
     url: HttpUrl
-    depth: Literal["shallow", "standard", "deep"] = "standard"
+    depth: OutlineDepth = "standard"
 
 
 class DocsQARequest(BaseToolRequest):
@@ -90,7 +101,7 @@ class DocsQARequest(BaseToolRequest):
     question: str = Field(min_length=1)
     url: HttpUrl | None = None
     domain_allowlist: list[str] = Field(default_factory=list)
-    answer_mode: Literal["concise", "standard"] = "standard"
+    answer_mode: DocsAnswerMode = "standard"
 
     @field_validator("question")
     @classmethod
@@ -156,7 +167,7 @@ class ProviderInfo(BaseModel):
 class ToolDiagnostics(BaseModel):
     """Common diagnostics for all tools."""
 
-    status: Literal["ok", "partial", "empty", "error"]
+    status: ToolStatus
     provider: ProviderInfo
     warnings: list[WarningInfo] = Field(default_factory=list)
     error: ErrorInfo | None = None
@@ -167,13 +178,7 @@ class SearchNormalizationInfo(BaseModel):
 
     response_format_requested: Literal["json_object", "none"] = "json_object"
     response_format_accepted: bool = True
-    parse_mode: Literal[
-        "structured_v2",
-        "structured_legacy",
-        "text_fallback",
-        "url_fallback",
-        "error",
-    ]
+    parse_mode: ParseMode
 
 
 class SearchCoverage(BaseModel):
@@ -206,7 +211,7 @@ class QueryEcho(BaseModel):
     recency: str | None = None
     max_sources: int
     domain_allowlist: list[str] = Field(default_factory=list)
-    return_mode: Literal["concise", "standard"]
+    return_mode: ReturnMode
 
 
 class Citation(BaseModel):
@@ -256,7 +261,7 @@ class ExtractRequestEcho(BaseModel):
     """Echo of extract_url input."""
 
     url: HttpUrl
-    mode: Literal["body", "markdown", "best_effort"]
+    mode: ExtractMode
     max_chars: int
 
 
@@ -267,7 +272,7 @@ class ExtractResult(BaseModel):
     title: str = ""
     url: HttpUrl
     content: str = ""
-    content_format: Literal["text", "markdown"] = "text"
+    content_format: ContentFormat = "text"
     truncated: bool = False
     likely_rewritten: bool = True
     diagnostics: ToolDiagnostics
@@ -277,7 +282,7 @@ class OutlineRequestEcho(BaseModel):
     """Echo of outline_url input."""
 
     url: HttpUrl
-    depth: Literal["shallow", "standard", "deep"]
+    depth: OutlineDepth
 
 
 class OutlineSection(BaseModel):
@@ -302,7 +307,7 @@ class DocsQARequestEcho(BaseModel):
     question: str
     url: HttpUrl | None = None
     domain_allowlist: list[str] = Field(default_factory=list)
-    answer_mode: Literal["concise", "standard"]
+    answer_mode: DocsAnswerMode
 
 
 class DocsQAResult(BaseModel):
@@ -349,12 +354,7 @@ class DocSourceResolutionResult(BaseModel):
     """Document source classification result."""
 
     request: DocSourceResolutionRequestEcho
-    source_type: Literal[
-        "llms_txt",
-        "page_url",
-        "library_docs_query",
-        "web_search_query",
-    ]
+    source_type: DocSourceType
     resolved_url: HttpUrl | None = None
     confidence: float = Field(ge=0.0, le=1.0)
     rationale: str = ""

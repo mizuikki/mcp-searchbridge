@@ -9,6 +9,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from mcp.client.session import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
+from tests.helpers import host_port
+
 
 class _MCPFakeOpenAIHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
@@ -89,7 +91,7 @@ def test_mcp_stdio_tools_list_and_call() -> None:
     thread.start()
 
     try:
-        host, port = server.server_address
+        host, port = host_port(server.server_address)
         env = os.environ.copy()
         env.update(
             {
@@ -167,7 +169,7 @@ def test_mcp_stdio_invalid_request_returns_structured_error() -> None:
     thread.start()
 
     try:
-        host, port = server.server_address
+        host, port = host_port(server.server_address)
         env = os.environ.copy()
         env.update(
             {

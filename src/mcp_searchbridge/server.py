@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Literal
+from typing import Protocol
 
 from mcp.server.fastmcp import FastMCP
 from pydantic import ValidationError
@@ -36,13 +36,42 @@ from .models import (
     ToolDiagnostics,
 )
 from .openai_backend import OpenAIAggregationBackend
+from .type_utils import (
+    DocsAnswerMode,
+    ExtractMode,
+    LogLevel,
+    OutlineDepth,
+    ReturnMode,
+    parse_http_url,
+    parse_optional_http_url,
+)
 
 LOGGER = logging.getLogger(__name__)
 
 
+class AggregationBackend(Protocol):
+    provider_name: str
+
+    def search_web(self, request: SearchRequest) -> SearchResult: ...
+
+    def extract_url(self, request: ExtractUrlRequest) -> ExtractResult: ...
+
+    def outline_url(self, request: OutlineUrlRequest) -> OutlineResult: ...
+
+    def docs_qa(self, request: DocsQARequest) -> DocsQAResult: ...
+
+    def find_official_docs(
+        self, request: FindOfficialDocsRequest
+    ) -> OfficialDocsResult: ...
+
+    def resolve_doc_source(
+        self, request: DocSourceResolutionRequest
+    ) -> DocSourceResolutionResult: ...
+
+
 def create_server(
     settings: Settings | None = None,
-    backend: OpenAIAggregationBackend | None = None,
+    backend: AggregationBackend | None = None,
 ) -> FastMCP:
     """Create the FastMCP application and register tools."""
 
@@ -71,7 +100,7 @@ def create_server(
         recency: str | None = None,
         max_sources: int | None = None,
         domain_allowlist: list[str] | None = None,
-        return_mode: Literal["concise", "standard"] = "standard",
+        return_mode: ReturnMode = "standard",
     ) -> SearchResult:
         try:
             request = SearchRequest(
@@ -147,11 +176,15 @@ def create_server(
     )
     def extract_url(
         url: str,
-        mode: Literal["body", "markdown", "best_effort"] = "best_effort",
+        mode: ExtractMode = "best_effort",
         max_chars: int = 12000,
     ) -> ExtractResult:
         try:
-            request = ExtractUrlRequest(url=url, mode=mode, max_chars=max_chars)
+            request = ExtractUrlRequest(
+                url=parse_http_url(url),
+                mode=mode,
+                max_chars=max_chars,
+            )
             return aggregation_backend.extract_url(request)
         except ValidationError as exc:
             LOGGER.error("extract_url validation failed: %s", exc)
@@ -184,10 +217,10 @@ def create_server(
     )
     def outline_url(
         url: str,
-        depth: Literal["shallow", "standard", "deep"] = "standard",
+        depth: OutlineDepth = "standard",
     ) -> OutlineResult:
         try:
-            request = OutlineUrlRequest(url=url, depth=depth)
+            request = OutlineUrlRequest(url=parse_http_url(url), depth=depth)
             return aggregation_backend.outline_url(request)
         except ValidationError as exc:
             LOGGER.error("outline_url validation failed: %s", exc)
@@ -220,12 +253,12 @@ def create_server(
         question: str,
         url: str | None = None,
         domain_allowlist: list[str] | None = None,
-        answer_mode: Literal["concise", "standard"] = "standard",
+        answer_mode: DocsAnswerMode = "standard",
     ) -> DocsQAResult:
         try:
             request = DocsQARequest(
                 question=question,
-                url=url,
+                url=parse_optional_http_url(url),
                 domain_allowlist=domain_allowlist or [],
                 answer_mode=answer_mode,
             )
@@ -330,7 +363,7 @@ def main() -> None:
     server.run(transport="stdio")
 
 
-def _configure_logging(level: str) -> None:
+def _configure_logging(level: LogLevel) -> None:
     logging.basicConfig(
         level=getattr(logging, level, logging.INFO),
         format="%(levelname)s %(name)s: %(message)s",
@@ -359,7 +392,7 @@ def _search_error_result(
     recency: str | None,
     max_sources: int | None,
     domain_allowlist: list[str],
-    return_mode: Literal["concise", "standard"],
+    return_mode: ReturnMode,
     provider: str,
     model: str,
     code: str,
@@ -401,7 +434,7 @@ def _search_error_result(
 def _extract_error_result(
     *,
     url: str,
-    mode: Literal["body", "markdown", "best_effort"],
+    mode: ExtractMode,
     max_chars: int,
     provider: str,
     model: str,
@@ -410,9 +443,13 @@ def _extract_error_result(
     retryable: bool,
 ) -> ExtractResult:
     return ExtractResult(
-        request=ExtractRequestEcho(url=url, mode=mode, max_chars=max_chars),
+        request=ExtractRequestEcho(
+            url=parse_http_url(url),
+            mode=mode,
+            max_chars=max_chars,
+        ),
         title="",
-        url=url,
+        url=parse_http_url(url),
         content="",
         content_format="text",
         truncated=False,
@@ -429,7 +466,7 @@ def _extract_error_result(
 def _outline_error_result(
     *,
     url: str,
-    depth: Literal["shallow", "standard", "deep"],
+    depth: OutlineDepth,
     provider: str,
     model: str,
     code: str,
@@ -437,7 +474,7 @@ def _outline_error_result(
     retryable: bool,
 ) -> OutlineResult:
     return OutlineResult(
-        request=OutlineRequestEcho(url=url, depth=depth),
+        request=OutlineRequestEcho(url=parse_http_url(url), depth=depth),
         title="",
         sections=[],
         diagnostics=ToolDiagnostics(
@@ -454,7 +491,7 @@ def _docs_qa_error_result(
     question: str,
     url: str | None,
     domain_allowlist: list[str],
-    answer_mode: Literal["concise", "standard"],
+    answer_mode: DocsAnswerMode,
     provider: str,
     model: str,
     code: str,
@@ -464,7 +501,7 @@ def _docs_qa_error_result(
     return DocsQAResult(
         request=DocsQARequestEcho(
             question=question,
-            url=url,
+            url=parse_optional_http_url(url),
             domain_allowlist=domain_allowlist,
             answer_mode=answer_mode,
         ),

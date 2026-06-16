@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Any
 
 import pytest
 
-from mcp_searchbridge.config import Settings
 from mcp_searchbridge.errors import UpstreamLogContext, UpstreamSearchError
 from mcp_searchbridge.models import (
     Citation,
@@ -38,6 +38,7 @@ from mcp_searchbridge.models import (
     ToolDiagnostics,
 )
 from mcp_searchbridge.server import create_server
+from tests.helpers import make_settings, optional_url, url
 
 
 class FakeBackend:
@@ -69,7 +70,7 @@ class FakeBackend:
                     source_id="source_1",
                     rank=1,
                     title="Example",
-                    url="https://example.com/search",
+                    url=url("https://example.com/search"),
                     domain="example.com",
                     published_at=None,
                     domain_allowed=True,
@@ -149,7 +150,7 @@ class FakeBackend:
                     source_id="source_1",
                     rank=1,
                     title="Docs Source",
-                    url="https://example.com/docs",
+                    url=url("https://example.com/docs"),
                     domain="example.com",
                     published_at=None,
                     domain_allowed=True,
@@ -168,7 +169,7 @@ class FakeBackend:
             ),
         )
 
-    def find_official_docs(self, request):
+    def find_official_docs(self, request: Any) -> OfficialDocsResult:
         return OfficialDocsResult(
             request=OfficialDocsRequestEcho(
                 query=request.query,
@@ -177,7 +178,7 @@ class FakeBackend:
             matches=[
                 OfficialDocMatch(
                     title="Official Docs",
-                    url="https://example.com/docs",
+                    url=url("https://example.com/docs"),
                     domain="example.com",
                     rationale="Canonical site",
                 )
@@ -197,7 +198,7 @@ class FakeBackend:
         return DocSourceResolutionResult(
             request=DocSourceResolutionRequestEcho(query_or_url=request.query_or_url),
             source_type="llms_txt",
-            resolved_url="https://example.com/llms.txt",
+            resolved_url=optional_url("https://example.com/llms.txt"),
             confidence=0.9,
             rationale="Looks like llms.txt",
             diagnostics=ToolDiagnostics(
@@ -225,7 +226,7 @@ class FailingBackend(FakeBackend):
     def docs_qa(self, request: DocsQARequest) -> DocsQAResult:
         raise self.exc
 
-    def find_official_docs(self, request) -> OfficialDocsResult:
+    def find_official_docs(self, request: Any) -> OfficialDocsResult:
         raise self.exc
 
     def resolve_doc_source(
@@ -236,12 +237,7 @@ class FailingBackend(FakeBackend):
 
 
 def test_create_server_registers_tools() -> None:
-    settings = Settings(
-        _env_file=None,
-        OPENAI_API_KEY="test-key",
-        OPENAI_BASE_URL="https://api.example.com/v1",
-        OPENAI_MODEL="fake-model",
-    )
+    settings = make_settings(OPENAI_MODEL="fake-model")
     backend = FakeBackend()
 
     server = create_server(settings=settings, backend=backend)
@@ -262,12 +258,7 @@ def test_create_server_registers_tools() -> None:
 def test_server_returns_sanitized_upstream_errors_for_all_tools(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    settings = Settings(
-        _env_file=None,
-        OPENAI_API_KEY="test-key",
-        OPENAI_BASE_URL="https://api.example.com/v1",
-        OPENAI_MODEL="fake-model",
-    )
+    settings = make_settings(OPENAI_MODEL="fake-model")
     exc = UpstreamSearchError(
         "Could not connect to the upstream provider.",
         retryable=True,

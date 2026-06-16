@@ -3,15 +3,16 @@ from __future__ import annotations
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import cast
 
 import httpx
 import openai
 import pytest
 
-from mcp_searchbridge.config import Settings
 from mcp_searchbridge.errors import UpstreamSearchError
 from mcp_searchbridge.models import ExtractUrlRequest, SearchRequest
-from mcp_searchbridge.openai_backend import OpenAIAggregationBackend
+from mcp_searchbridge.openai_backend import ChatNamespace, OpenAIAggregationBackend
+from tests.helpers import host_port, make_settings, url
 
 
 class _ChatCompletionsHandler(BaseHTTPRequestHandler):
@@ -272,10 +273,8 @@ def test_backend_search_against_fake_openai_endpoint() -> None:
     thread.start()
 
     try:
-        host, port = server.server_address
-        settings = Settings(
-            _env_file=None,
-            OPENAI_API_KEY="test-key",
+        host, port = host_port(server.server_address)
+        settings = make_settings(
             OPENAI_BASE_URL=f"http://{host}:{port}/v1",
             OPENAI_MODEL="fake-search-model",
         )
@@ -308,10 +307,8 @@ def test_backend_extract_against_fake_openai_endpoint() -> None:
     thread.start()
 
     try:
-        host, port = server.server_address
-        settings = Settings(
-            _env_file=None,
-            OPENAI_API_KEY="test-key",
+        host, port = host_port(server.server_address)
+        settings = make_settings(
             OPENAI_BASE_URL=f"http://{host}:{port}/v1",
             OPENAI_MODEL="fake-search-model",
         )
@@ -319,7 +316,7 @@ def test_backend_extract_against_fake_openai_endpoint() -> None:
 
         result = backend.extract_url(
             ExtractUrlRequest(
-                url="https://example.com/page",
+                url=url("https://example.com/page"),
                 mode="best_effort",
                 max_chars=1000,
             )
@@ -342,10 +339,8 @@ def test_backend_falls_back_when_structured_output_is_rejected() -> None:
     thread.start()
 
     try:
-        host, port = server.server_address
-        settings = Settings(
-            _env_file=None,
-            OPENAI_API_KEY="test-key",
+        host, port = host_port(server.server_address)
+        settings = make_settings(
             OPENAI_BASE_URL=f"http://{host}:{port}/v1",
             OPENAI_MODEL="fake-search-model",
         )
@@ -372,10 +367,8 @@ def test_backend_skips_structured_output_after_capability_is_cached() -> None:
     thread.start()
 
     try:
-        host, port = server.server_address
-        settings = Settings(
-            _env_file=None,
-            OPENAI_API_KEY="test-key",
+        host, port = host_port(server.server_address)
+        settings = make_settings(
             OPENAI_BASE_URL=f"http://{host}:{port}/v1",
             OPENAI_MODEL="fake-search-model",
         )
@@ -401,10 +394,8 @@ def test_backend_does_not_fallback_for_unrelated_bad_request() -> None:
     thread.start()
 
     try:
-        host, port = server.server_address
-        settings = Settings(
-            _env_file=None,
-            OPENAI_API_KEY="test-key",
+        host, port = host_port(server.server_address)
+        settings = make_settings(
             OPENAI_BASE_URL=f"http://{host}:{port}/v1",
             OPENAI_MODEL="fake-search-model",
         )
@@ -440,15 +431,12 @@ def test_backend_connection_errors_are_sanitized() -> None:
 
     class _FailingClient:
         def __init__(self) -> None:
-            self.chat = type(
-                "ChatNamespace",
-                (),
-                {"completions": _FailingChatCompletions()},
-            )()
+            class _ChatNamespaceImpl:
+                completions = _FailingChatCompletions()
 
-    settings = Settings(
-        _env_file=None,
-        OPENAI_API_KEY="test-key",
+            self.chat = cast(ChatNamespace, _ChatNamespaceImpl())
+
+    settings = make_settings(
         OPENAI_BASE_URL="http://192.168.5.1:23000/v1",
         OPENAI_MODEL="fake-search-model",
     )
@@ -472,10 +460,8 @@ def test_backend_marks_404_like_pages_as_empty_or_partial() -> None:
     thread.start()
 
     try:
-        host, port = server.server_address
-        settings = Settings(
-            _env_file=None,
-            OPENAI_API_KEY="test-key",
+        host, port = host_port(server.server_address)
+        settings = make_settings(
             OPENAI_BASE_URL=f"http://{host}:{port}/v1",
             OPENAI_MODEL="fake-search-model",
         )
@@ -483,7 +469,7 @@ def test_backend_marks_404_like_pages_as_empty_or_partial() -> None:
 
         extract_result = backend.extract_url(
             ExtractUrlRequest(
-                url="https://pydantic.dev/this-page-should-not-exist",
+                url=url("https://pydantic.dev/this-page-should-not-exist"),
                 mode="best_effort",
                 max_chars=1200,
             )
@@ -506,10 +492,8 @@ def test_backend_normalizes_404_warning_aliases() -> None:
     thread.start()
 
     try:
-        host, port = server.server_address
-        settings = Settings(
-            _env_file=None,
-            OPENAI_API_KEY="test-key",
+        host, port = host_port(server.server_address)
+        settings = make_settings(
             OPENAI_BASE_URL=f"http://{host}:{port}/v1",
             OPENAI_MODEL="fake-search-model",
         )
@@ -517,7 +501,7 @@ def test_backend_normalizes_404_warning_aliases() -> None:
 
         result = backend.extract_url(
             ExtractUrlRequest(
-                url="https://example.com/missing",
+                url=url("https://example.com/missing"),
                 mode="best_effort",
                 max_chars=500,
             )

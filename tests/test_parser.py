@@ -1,8 +1,9 @@
 from mcp_searchbridge.models import SearchRequest
 from mcp_searchbridge.parser import parse_search_response
+from mcp_searchbridge.type_utils import ReturnMode
 
 
-def _request(return_mode: str = "standard") -> SearchRequest:
+def _request(return_mode: ReturnMode = "standard") -> SearchRequest:
     return SearchRequest(
         query="latest update",
         recency="week",

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Any
+from typing import Any, cast
 
 from pydantic import Field, HttpUrl, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from .type_utils import LogLevel
 
 DEFAULT_SYSTEM_PROMPT = """You are a web search tool behind an MCP server.
 Use the upstream model's available internet or search capability if the
@@ -53,12 +55,15 @@ class Settings(BaseSettings):
         ge=1,
         le=20,
     )
-    searchbridge_log_level: str = Field(default="INFO", alias="SEARCHBRIDGE_LOG_LEVEL")
+    searchbridge_log_level: LogLevel = Field(
+        default="INFO",
+        alias="SEARCHBRIDGE_LOG_LEVEL",
+    )
 
-    @field_validator("searchbridge_log_level")
+    @field_validator("searchbridge_log_level", mode="before")
     @classmethod
-    def normalize_log_level(cls, value: str) -> str:
-        normalized = value.upper()
+    def normalize_log_level(cls, value: object) -> LogLevel:
+        normalized = str(value).upper()
         valid_levels = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
         if normalized not in valid_levels:
             msg = (
@@ -66,7 +71,7 @@ class Settings(BaseSettings):
                 f"{', '.join(sorted(valid_levels))}"
             )
             raise ValueError(msg)
-        return normalized
+        return cast(LogLevel, normalized)
 
     @field_validator("searchbridge_system_prompt", mode="before")
     @classmethod
@@ -82,4 +87,4 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Load and cache settings for the current process."""
 
-    return Settings()
+    return Settings()  # pyright: ignore[reportCallIssue]

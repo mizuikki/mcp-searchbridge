@@ -5,11 +5,20 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from typing import Any
+from typing import Any, Protocol, cast
 from urllib.parse import urlparse
 
 import openai
 from openai import OpenAI
+from openai.types.chat import (
+    ChatCompletion,
+    ChatCompletionMessageParam,
+    ChatCompletionSystemMessageParam,
+    ChatCompletionUserMessageParam,
+)
+from openai.types.shared_params.response_format_json_object import (
+    ResponseFormatJSONObject,
+)
 
 from .config import Settings
 from .errors import UpstreamLogContext, UpstreamSearchError
@@ -51,12 +60,37 @@ from .prompts import (
     build_search_user_prompt,
     build_system_prompt,
 )
+from .type_utils import (
+    ContentFormat,
+    DocSourceType,
+    ToolStatus,
+    parse_http_url,
+    parse_optional_http_url,
+)
 
 LOGGER = logging.getLogger(__name__)
 
-STRUCTURED_RESPONSE_FORMAT: dict[str, Any] = {"type": "json_object"}
+STRUCTURED_RESPONSE_FORMAT: ResponseFormatJSONObject = {"type": "json_object"}
 _STRUCTURED_OUTPUT_CACHE_LOCK = threading.Lock()
 _STRUCTURED_OUTPUT_UNSUPPORTED_CACHE: dict[tuple[str, str], bool] = {}
+
+
+class ChatCompletionsClient(Protocol):
+    def create(
+        self,
+        *,
+        model: str,
+        messages: list[ChatCompletionMessageParam],
+        response_format: ResponseFormatJSONObject | None = None,
+    ) -> ChatCompletion: ...
+
+
+class ChatNamespace(Protocol):
+    completions: ChatCompletionsClient
+
+
+class OpenAIClient(Protocol):
+    chat: ChatNamespace
 
 
 class OpenAIAggregationBackend:
@@ -64,7 +98,7 @@ class OpenAIAggregationBackend:
 
     provider_name = "openai-compatible"
 
-    def __init__(self, settings: Settings, client: OpenAI | None = None) -> None:
+    def __init__(self, settings: Settings, client: OpenAIClient | None = None) -> None:
         self.settings = settings
         self.client = client or OpenAI(
             api_key=settings.openai_api_key,
@@ -130,9 +164,9 @@ class OpenAIAggregationBackend:
                 max_chars=request.max_chars,
             ),
             title=title,
-            url=url,
+            url=parse_http_url(url),
             content=body,
-            content_format=content_format,
+            content_format=cast(ContentFormat, content_format),
             truncated=truncated,
             likely_rewritten=likely_rewritten,
             diagnostics=_tool_diagnostics(
@@ -239,7 +273,7 @@ class OpenAIAggregationBackend:
                 matches.append(
                     OfficialDocMatch(
                         title=title,
-                        url=url,
+                        url=parse_http_url(url),
                         domain=_domain_from_url(url),
                         rationale=_safe_text(item.get("rationale", "")),
                     )
@@ -285,8 +319,8 @@ class OpenAIAggregationBackend:
         )
         return DocSourceResolutionResult(
             request=DocSourceResolutionRequestEcho(query_or_url=request.query_or_url),
-            source_type=source_type,
-            resolved_url=resolved_url,
+            source_type=cast(DocSourceType, source_type),
+            resolved_url=parse_optional_http_url(resolved_url),
             confidence=confidence,
             rationale=rationale,
             diagnostics=_tool_diagnostics(
@@ -297,14 +331,12 @@ class OpenAIAggregationBackend:
         )
 
     def _call_json_tool(self, user_prompt: str) -> tuple[str, bool, list[str]]:
-        messages = [
-            {
-                "role": "system",
-                "content": build_system_prompt(
-                    self.settings.searchbridge_system_prompt
-                ),
-            },
-            {"role": "user", "content": user_prompt},
+        messages: list[ChatCompletionMessageParam] = [
+            ChatCompletionSystemMessageParam(
+                role="system",
+                content=build_system_prompt(self.settings.searchbridge_system_prompt),
+            ),
+            ChatCompletionUserMessageParam(role="user", content=user_prompt),
         ]
 
         warning_codes: list[str] = []
@@ -350,7 +382,7 @@ class OpenAIAggregationBackend:
         except openai.OpenAIError as exc:
             raise _build_upstream_error(exc) from exc
 
-    def _fallback_completion(self, messages: list[dict[str, str]]) -> str:
+    def _fallback_completion(self, messages: list[ChatCompletionMessageParam]) -> str:
         try:
             response = self.client.chat.completions.create(
                 model=self.settings.openai_model,
@@ -382,19 +414,29 @@ def _message_content(response: Any) -> str:
         content = _content_from_string_response(response)
         if content:
             return content
-        raise UpstreamSearchError("Upstream string response content was empty.")
+        raise UpstreamSearchError(
+            "Upstream string response content was empty.",
+            retryable=False,
+            log_context=UpstreamLogContext(error_type="EmptyStringResponse"),
+        )
 
     try:
         message = response.choices[0].message
     except (AttributeError, IndexError, KeyError, TypeError) as exc:
         raise UpstreamSearchError(
-            "Upstream response did not contain a chat message."
+            "Upstream response did not contain a chat message.",
+            retryable=False,
+            log_context=UpstreamLogContext(error_type=type(exc).__name__),
         ) from exc
 
     content = getattr(message, "content", None)
     if isinstance(content, str) and content.strip():
         return content
-    raise UpstreamSearchError("Upstream response message content was empty.")
+    raise UpstreamSearchError(
+        "Upstream response message content was empty.",
+        retryable=False,
+        log_context=UpstreamLogContext(error_type="EmptyMessageContent"),
+    )
 
 
 def _structured_output_unsupported_cached(cache_key: tuple[str, str]) -> bool:
@@ -514,7 +556,7 @@ def _parse_sources_from_payload(
                 source_id=_safe_text(item.get("source_id", "")) or f"source_{index}",
                 rank=index,
                 title=title,
-                url=url,
+                url=parse_http_url(url),
                 domain=_domain_from_url(url),
                 published_at=_safe_optional_text(item.get("published_at")),
                 domain_allowed=_domain_allowed(
@@ -573,7 +615,7 @@ def _tool_diagnostics(
     *,
     provider: ProviderInfo,
     warning_codes: list[str],
-    status: str,
+    status: ToolStatus,
     error: ErrorInfo | None = None,
 ) -> ToolDiagnostics:
     warnings = [
@@ -612,11 +654,11 @@ def _domain_allowed(*, domain: str, allowlist: list[str]) -> bool:
     return False
 
 
-def _status_from_body(body: str) -> str:
+def _status_from_body(body: str) -> ToolStatus:
     return "ok" if body.strip() else "empty"
 
 
-def _extract_status(body: str) -> str:
+def _extract_status(body: str) -> ToolStatus:
     text = body.strip()
     if not text:
         return "empty"
@@ -649,7 +691,9 @@ def _outline_warning_codes(body: str, sections: list[OutlineSection]) -> list[st
     return []
 
 
-def _outline_status(*, title: str, sections: list[OutlineSection], body: str) -> str:
+def _outline_status(
+    *, title: str, sections: list[OutlineSection], body: str
+) -> ToolStatus:
     if not sections:
         return "empty"
     if _looks_like_not_found_page(body) or _looks_like_placeholder_page(body):
@@ -709,6 +753,10 @@ def _safe_literal(value: object, allowed: set[str], default: str) -> str:
 
 
 def _safe_confidence(value: object) -> float:
+    if isinstance(value, bool):
+        return 1.0 if value else 0.0
+    if not isinstance(value, (int, float, str)):
+        return 0.5
     try:
         number = float(value)
     except TypeError, ValueError:
@@ -772,8 +820,11 @@ def _build_upstream_error(exc: Exception) -> UpstreamSearchError:
 
 
 def _upstream_log_context(exc: Exception) -> UpstreamLogContext:
-    status_code = exc.status_code if isinstance(exc, openai.APIStatusError) else None
-    request_id = exc.request_id if isinstance(exc, openai.APIStatusError) else None
+    status_code: int | None = None
+    request_id: str | None = None
+    if isinstance(exc, openai.APIStatusError):
+        status_code = exc.status_code
+        request_id = exc.request_id
     return UpstreamLogContext(
         error_type=type(exc).__name__,
         status_code=status_code,
