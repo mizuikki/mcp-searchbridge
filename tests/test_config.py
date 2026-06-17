@@ -57,3 +57,59 @@ def test_settings_normalize_all_log_levels(raw_level: str, expected: str) -> Non
 def test_settings_reject_invalid_log_level() -> None:
     with pytest.raises(ValidationError, match="SEARCHBRIDGE_LOG_LEVEL must be one of"):
         make_settings(SEARCHBRIDGE_LOG_LEVEL="verbose")
+
+
+def test_settings_default_backend_kind_is_openai() -> None:
+    settings = make_settings()
+
+    assert settings.searchbridge_backend_kind == "openai"
+    assert settings.searchbridge_private_backend_fallback_to_openai is False
+
+
+def test_settings_require_private_backend_url_for_private_http_mode() -> None:
+    with pytest.raises(
+        ValidationError,
+        match=(
+            "SEARCHBRIDGE_PRIVATE_BACKEND_URL is required when "
+            "SEARCHBRIDGE_BACKEND_KIND=private_http"
+        ),
+    ):
+        make_settings(
+            SEARCHBRIDGE_BACKEND_KIND="private_http",
+            OPENAI_API_KEY=None,
+            OPENAI_BASE_URL=None,
+            OPENAI_MODEL=None,
+        )
+
+
+def test_settings_allow_private_http_without_openai_when_fallback_disabled() -> None:
+    settings = make_settings(
+        SEARCHBRIDGE_BACKEND_KIND="private_http",
+        SEARCHBRIDGE_PRIVATE_BACKEND_URL="https://private.example.com",
+        OPENAI_API_KEY=None,
+        OPENAI_BASE_URL=None,
+        OPENAI_MODEL=None,
+    )
+
+    assert settings.searchbridge_backend_kind == "private_http"
+    assert (
+        str(settings.searchbridge_private_backend_url) == "https://private.example.com/"
+    )
+
+
+def test_settings_require_openai_config_when_private_fallback_enabled() -> None:
+    with pytest.raises(
+        ValidationError,
+        match=(
+            "OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL must be set when "
+            "SEARCHBRIDGE_PRIVATE_BACKEND_FALLBACK_TO_OPENAI=true"
+        ),
+    ):
+        make_settings(
+            SEARCHBRIDGE_BACKEND_KIND="private_http",
+            SEARCHBRIDGE_PRIVATE_BACKEND_URL="https://private.example.com",
+            SEARCHBRIDGE_PRIVATE_BACKEND_FALLBACK_TO_OPENAI=True,
+            OPENAI_API_KEY=None,
+            OPENAI_BASE_URL=None,
+            OPENAI_MODEL=None,
+        )

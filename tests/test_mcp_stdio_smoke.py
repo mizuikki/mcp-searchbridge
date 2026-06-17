@@ -85,6 +85,27 @@ class _MCPFakeOpenAIHandler(BaseHTTPRequestHandler):
         return
 
 
+class _MCPPrivateErrorHandler(BaseHTTPRequestHandler):
+    def do_POST(self) -> None:  # noqa: N802
+        self.send_response(401)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(
+            json.dumps(
+                {
+                    "error": {
+                        "code": "backend_auth_failed",
+                        "message": "Private backend auth failed.",
+                        "retryable": False,
+                    }
+                }
+            ).encode("utf-8")
+        )
+
+    def log_message(self, format: str, *args: object) -> None:  # noqa: A003
+        return
+
+
 def test_mcp_stdio_tools_list_and_call() -> None:
     server = ThreadingHTTPServer(("127.0.0.1", 0), _MCPFakeOpenAIHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -142,6 +163,7 @@ def test_mcp_stdio_tools_list_and_call() -> None:
                 assert structured["summary"]["text"] == "Smoke test answer"
                 assert structured["sources"][0]["url"] == "https://example.com/smoke"
                 assert structured["diagnostics"]["provider"]["model"] == "smoke-model"
+                assert structured["diagnostics"]["backend_kind"] == "openai"
 
                 extract_result = await session.call_tool(
                     "extract_url",
@@ -210,6 +232,64 @@ def test_mcp_stdio_invalid_request_returns_structured_error() -> None:
                 )
 
         asyncio.run(run_invalid())
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_mcp_stdio_private_backend_preserves_structured_error_code() -> None:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _MCPPrivateErrorHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        host, port = host_port(server.server_address)
+        env = os.environ.copy()
+        env.update(
+            {
+                "SEARCHBRIDGE_BACKEND_KIND": "private_http",
+                "SEARCHBRIDGE_PRIVATE_BACKEND_URL": f"http://{host}:{port}",
+            }
+        )
+        env.pop("OPENAI_API_KEY", None)
+        env.pop("OPENAI_BASE_URL", None)
+        env.pop("OPENAI_MODEL", None)
+
+        server_params = StdioServerParameters(
+            command="uv",
+            args=["run", "mcp-searchbridge"],
+            cwd=os.getcwd(),
+            env=env,
+        )
+
+        async def run_private_error() -> None:
+            async with (
+                stdio_client(server_params) as (read, write),
+                ClientSession(read, write) as session,
+            ):
+                await session.initialize()
+                result = await session.call_tool(
+                    "search_web",
+                    {
+                        "query": "private auth failure",
+                    },
+                )
+
+                assert not result.isError
+                assert result.structuredContent is not None
+                structured = result.structuredContent
+                assert structured["diagnostics"]["status"] == "error"
+                assert (
+                    structured["diagnostics"]["error"]["code"] == "backend_auth_failed"
+                )
+                assert (
+                    structured["diagnostics"]["error"]["message"]
+                    == "Private backend auth failed."
+                )
+                assert structured["diagnostics"]["error"]["retryable"] is False
+                assert structured["diagnostics"]["backend_kind"] == "private_http"
+
+        asyncio.run(run_private_error())
     finally:
         server.shutdown()
         server.server_close()

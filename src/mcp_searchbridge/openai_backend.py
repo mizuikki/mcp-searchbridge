@@ -97,20 +97,22 @@ class OpenAIAggregationBackend:
     """Bridge multiple MCP retrieval tools into an OpenAI-compatible provider."""
 
     provider_name = "openai-compatible"
+    backend_kind = "openai"
 
     def __init__(self, settings: Settings, client: OpenAIClient | None = None) -> None:
         self.settings = settings
+        self.provider_model = settings.resolved_openai_model
         self.client = client or OpenAI(
-            api_key=settings.openai_api_key,
-            base_url=str(settings.openai_base_url),
+            api_key=settings.resolved_openai_api_key,
+            base_url=str(settings.resolved_openai_base_url),
             organization=settings.openai_organization,
             project=settings.openai_project,
             timeout=settings.openai_timeout_seconds,
             max_retries=settings.openai_max_retries,
         )
         self._structured_output_cache_key = (
-            str(settings.openai_base_url),
-            settings.openai_model,
+            str(settings.resolved_openai_base_url),
+            settings.resolved_openai_model,
         )
 
     def search_web(self, request: SearchRequest) -> SearchResult:
@@ -123,9 +125,10 @@ class OpenAIAggregationBackend:
             content=content,
             request=request,
             provider=self.provider_name,
-            model=self.settings.openai_model,
+            model=self.provider_model,
             response_format_requested="json_object",
             response_format_accepted=response_format_accepted,
+            backend_kind=self.backend_kind,
         )
         _append_warning_codes(result.diagnostics, warning_codes)
         return result
@@ -173,6 +176,7 @@ class OpenAIAggregationBackend:
                 provider=self._provider_info(),
                 warning_codes=warning_codes,
                 status=_extract_status(body),
+                backend_kind=self.backend_kind,
             ),
         )
 
@@ -215,6 +219,7 @@ class OpenAIAggregationBackend:
                     sections=sections,
                     body=content,
                 ),
+                backend_kind=self.backend_kind,
             ),
         )
 
@@ -247,6 +252,7 @@ class OpenAIAggregationBackend:
                 provider=self._provider_info(),
                 warning_codes=warning_codes,
                 status="ok" if sources else "partial",
+                backend_kind=self.backend_kind,
             ),
         )
 
@@ -291,6 +297,7 @@ class OpenAIAggregationBackend:
                 provider=self._provider_info(),
                 warning_codes=warning_codes,
                 status="ok" if matches else "empty",
+                backend_kind=self.backend_kind,
             ),
         )
 
@@ -327,6 +334,7 @@ class OpenAIAggregationBackend:
                 provider=self._provider_info(),
                 warning_codes=warning_codes,
                 status="ok",
+                backend_kind=self.backend_kind,
             ),
         )
 
@@ -346,7 +354,7 @@ class OpenAIAggregationBackend:
         try:
             if structured_output_supported:
                 response = self.client.chat.completions.create(
-                    model=self.settings.openai_model,
+                    model=self.provider_model,
                     messages=messages,
                     response_format=STRUCTURED_RESPONSE_FORMAT,
                 )
@@ -385,7 +393,7 @@ class OpenAIAggregationBackend:
     def _fallback_completion(self, messages: list[ChatCompletionMessageParam]) -> str:
         try:
             response = self.client.chat.completions.create(
-                model=self.settings.openai_model,
+                model=self.provider_model,
                 messages=messages,
             )
             return _message_content(response)
@@ -401,7 +409,7 @@ class OpenAIAggregationBackend:
             raise _build_upstream_error(exc) from exc
 
     def _provider_info(self) -> ProviderInfo:
-        return ProviderInfo(name=self.provider_name, model=self.settings.openai_model)
+        return ProviderInfo(name=self.provider_name, model=self.provider_model)
 
     def _structured_output_supported(self) -> bool:
         return not _structured_output_unsupported_cached(
@@ -616,6 +624,7 @@ def _tool_diagnostics(
     provider: ProviderInfo,
     warning_codes: list[str],
     status: ToolStatus,
+    backend_kind: str | None = None,
     error: ErrorInfo | None = None,
 ) -> ToolDiagnostics:
     warnings = [
@@ -625,6 +634,7 @@ def _tool_diagnostics(
     return ToolDiagnostics(
         status=status,
         provider=provider,
+        backend_kind=backend_kind,
         warnings=warnings,
         error=error,
     )

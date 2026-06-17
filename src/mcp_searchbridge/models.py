@@ -169,6 +169,12 @@ class ToolDiagnostics(BaseModel):
 
     status: ToolStatus
     provider: ProviderInfo
+    backend_kind: str | None = None
+    capabilities_used: list[str] = Field(default_factory=list)
+    reproducible: bool | None = None
+    cache_hit: bool | None = None
+    version_locked: bool | None = None
+    resolved_version: str | None = None
     warnings: list[WarningInfo] = Field(default_factory=list)
     error: ErrorInfo | None = None
 

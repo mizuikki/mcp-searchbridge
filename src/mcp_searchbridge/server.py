@@ -8,6 +8,7 @@ from typing import Protocol
 from mcp.server.fastmcp import FastMCP
 from pydantic import ValidationError
 
+from .backend_factory import build_backend
 from .config import Settings, get_settings
 from .errors import SearchBridgeError, UpstreamSearchError
 from .models import (
@@ -35,7 +36,6 @@ from .models import (
     SearchResult,
     ToolDiagnostics,
 )
-from .openai_backend import OpenAIAggregationBackend
 from .type_utils import (
     DocsAnswerMode,
     ExtractMode,
@@ -77,7 +77,7 @@ def create_server(
 
     active_settings = settings or get_settings()
     _configure_logging(active_settings.searchbridge_log_level)
-    aggregation_backend = backend or OpenAIAggregationBackend(active_settings)
+    aggregation_backend = backend or build_backend(active_settings)
 
     mcp = FastMCP(
         name="mcp-searchbridge",
@@ -128,7 +128,8 @@ def create_server(
                 domain_allowlist=domain_allowlist or [],
                 return_mode=return_mode,
                 provider=aggregation_backend.provider_name,
-                model=active_settings.openai_model,
+                model=_backend_model(aggregation_backend, active_settings),
+                backend_kind=_backend_kind(aggregation_backend),
                 code="invalid_request",
                 message=f"Invalid search request: {exc}",
                 retryable=False,
@@ -146,8 +147,9 @@ def create_server(
                 domain_allowlist=domain_allowlist or [],
                 return_mode=return_mode,
                 provider=aggregation_backend.provider_name,
-                model=active_settings.openai_model,
-                code="upstream_request_failed",
+                model=_backend_model(aggregation_backend, active_settings),
+                backend_kind=_backend_kind(aggregation_backend),
+                code=exc.error_code or "upstream_request_failed",
                 message=exc.client_message,
                 retryable=exc.retryable,
             )
@@ -164,7 +166,8 @@ def create_server(
                 domain_allowlist=domain_allowlist or [],
                 return_mode=return_mode,
                 provider=aggregation_backend.provider_name,
-                model=active_settings.openai_model,
+                model=_backend_model(aggregation_backend, active_settings),
+                backend_kind=_backend_kind(aggregation_backend),
                 code="search_request_failed",
                 message=f"Search request failed: {exc}",
                 retryable=False,
@@ -193,7 +196,8 @@ def create_server(
                 mode=mode,
                 max_chars=max_chars,
                 provider=aggregation_backend.provider_name,
-                model=active_settings.openai_model,
+                model=_backend_model(aggregation_backend, active_settings),
+                backend_kind=_backend_kind(aggregation_backend),
                 code="invalid_request",
                 message=f"Invalid extract request: {exc}",
                 retryable=False,
@@ -205,8 +209,9 @@ def create_server(
                 mode=mode,
                 max_chars=max_chars,
                 provider=aggregation_backend.provider_name,
-                model=active_settings.openai_model,
-                code="upstream_request_failed",
+                model=_backend_model(aggregation_backend, active_settings),
+                backend_kind=_backend_kind(aggregation_backend),
+                code=exc.error_code or "upstream_request_failed",
                 message=exc.client_message,
                 retryable=exc.retryable,
             )
@@ -228,7 +233,8 @@ def create_server(
                 url=url,
                 depth=depth,
                 provider=aggregation_backend.provider_name,
-                model=active_settings.openai_model,
+                model=_backend_model(aggregation_backend, active_settings),
+                backend_kind=_backend_kind(aggregation_backend),
                 code="invalid_request",
                 message=f"Invalid outline request: {exc}",
                 retryable=False,
@@ -239,8 +245,9 @@ def create_server(
                 url=url,
                 depth=depth,
                 provider=aggregation_backend.provider_name,
-                model=active_settings.openai_model,
-                code="upstream_request_failed",
+                model=_backend_model(aggregation_backend, active_settings),
+                backend_kind=_backend_kind(aggregation_backend),
+                code=exc.error_code or "upstream_request_failed",
                 message=exc.client_message,
                 retryable=exc.retryable,
             )
@@ -271,7 +278,8 @@ def create_server(
                 domain_allowlist=domain_allowlist or [],
                 answer_mode=answer_mode,
                 provider=aggregation_backend.provider_name,
-                model=active_settings.openai_model,
+                model=_backend_model(aggregation_backend, active_settings),
+                backend_kind=_backend_kind(aggregation_backend),
                 code="invalid_request",
                 message=f"Invalid docs QA request: {exc}",
                 retryable=False,
@@ -284,8 +292,9 @@ def create_server(
                 domain_allowlist=domain_allowlist or [],
                 answer_mode=answer_mode,
                 provider=aggregation_backend.provider_name,
-                model=active_settings.openai_model,
-                code="upstream_request_failed",
+                model=_backend_model(aggregation_backend, active_settings),
+                backend_kind=_backend_kind(aggregation_backend),
+                code=exc.error_code or "upstream_request_failed",
                 message=exc.client_message,
                 retryable=exc.retryable,
             )
@@ -304,7 +313,8 @@ def create_server(
                 query=query,
                 max_results=max_results,
                 provider=aggregation_backend.provider_name,
-                model=active_settings.openai_model,
+                model=_backend_model(aggregation_backend, active_settings),
+                backend_kind=_backend_kind(aggregation_backend),
                 code="invalid_request",
                 message=f"Invalid official docs request: {exc}",
                 retryable=False,
@@ -315,8 +325,9 @@ def create_server(
                 query=query,
                 max_results=max_results,
                 provider=aggregation_backend.provider_name,
-                model=active_settings.openai_model,
-                code="upstream_request_failed",
+                model=_backend_model(aggregation_backend, active_settings),
+                backend_kind=_backend_kind(aggregation_backend),
+                code=exc.error_code or "upstream_request_failed",
                 message=exc.client_message,
                 retryable=exc.retryable,
             )
@@ -337,7 +348,8 @@ def create_server(
             return _resolve_source_error_result(
                 query_or_url=query_or_url,
                 provider=aggregation_backend.provider_name,
-                model=active_settings.openai_model,
+                model=_backend_model(aggregation_backend, active_settings),
+                backend_kind=_backend_kind(aggregation_backend),
                 code="invalid_request",
                 message=f"Invalid source resolution request: {exc}",
                 retryable=False,
@@ -347,8 +359,9 @@ def create_server(
             return _resolve_source_error_result(
                 query_or_url=query_or_url,
                 provider=aggregation_backend.provider_name,
-                model=active_settings.openai_model,
-                code="upstream_request_failed",
+                model=_backend_model(aggregation_backend, active_settings),
+                backend_kind=_backend_kind(aggregation_backend),
+                code=exc.error_code or "upstream_request_failed",
                 message=exc.client_message,
                 retryable=exc.retryable,
             )
@@ -374,6 +387,22 @@ def _provider_info(provider: str, model: str) -> ProviderInfo:
     return ProviderInfo(name=provider, model=model)
 
 
+def _backend_model(backend: AggregationBackend, settings: Settings) -> str:
+    model = getattr(backend, "provider_model", None)
+    if isinstance(model, str) and model.strip():
+        return model
+    if settings.openai_model:
+        return settings.openai_model
+    return "unknown"
+
+
+def _backend_kind(backend: AggregationBackend) -> str | None:
+    value = getattr(backend, "backend_kind", None)
+    if isinstance(value, str) and value.strip():
+        return value
+    return None
+
+
 def _log_upstream_failure(tool_name: str, exc: UpstreamSearchError) -> None:
     context = exc.log_context
     LOGGER.warning(
@@ -395,6 +424,7 @@ def _search_error_result(
     return_mode: ReturnMode,
     provider: str,
     model: str,
+    backend_kind: str | None,
     code: str,
     message: str,
     retryable: bool,
@@ -414,6 +444,7 @@ def _search_error_result(
         diagnostics=SearchDiagnostics(
             status="error",
             provider=_provider_info(provider, model),
+            backend_kind=backend_kind,
             normalization=SearchNormalizationInfo(
                 response_format_requested="json_object",
                 response_format_accepted=False,
@@ -438,6 +469,7 @@ def _extract_error_result(
     max_chars: int,
     provider: str,
     model: str,
+    backend_kind: str | None,
     code: str,
     message: str,
     retryable: bool,
@@ -457,6 +489,7 @@ def _extract_error_result(
         diagnostics=ToolDiagnostics(
             status="error",
             provider=_provider_info(provider, model),
+            backend_kind=backend_kind,
             warnings=[],
             error=ErrorInfo(code=code, message=message, retryable=retryable),
         ),
@@ -469,6 +502,7 @@ def _outline_error_result(
     depth: OutlineDepth,
     provider: str,
     model: str,
+    backend_kind: str | None,
     code: str,
     message: str,
     retryable: bool,
@@ -480,6 +514,7 @@ def _outline_error_result(
         diagnostics=ToolDiagnostics(
             status="error",
             provider=_provider_info(provider, model),
+            backend_kind=backend_kind,
             warnings=[],
             error=ErrorInfo(code=code, message=message, retryable=retryable),
         ),
@@ -494,6 +529,7 @@ def _docs_qa_error_result(
     answer_mode: DocsAnswerMode,
     provider: str,
     model: str,
+    backend_kind: str | None,
     code: str,
     message: str,
     retryable: bool,
@@ -511,6 +547,7 @@ def _docs_qa_error_result(
         diagnostics=ToolDiagnostics(
             status="error",
             provider=_provider_info(provider, model),
+            backend_kind=backend_kind,
             warnings=[],
             error=ErrorInfo(code=code, message=message, retryable=retryable),
         ),
@@ -523,6 +560,7 @@ def _official_docs_error_result(
     max_results: int,
     provider: str,
     model: str,
+    backend_kind: str | None,
     code: str,
     message: str,
     retryable: bool,
@@ -533,6 +571,7 @@ def _official_docs_error_result(
         diagnostics=ToolDiagnostics(
             status="error",
             provider=_provider_info(provider, model),
+            backend_kind=backend_kind,
             warnings=[],
             error=ErrorInfo(code=code, message=message, retryable=retryable),
         ),
@@ -544,6 +583,7 @@ def _resolve_source_error_result(
     query_or_url: str,
     provider: str,
     model: str,
+    backend_kind: str | None,
     code: str,
     message: str,
     retryable: bool,
@@ -557,6 +597,7 @@ def _resolve_source_error_result(
         diagnostics=ToolDiagnostics(
             status="error",
             provider=_provider_info(provider, model),
+            backend_kind=backend_kind,
             warnings=[],
             error=ErrorInfo(code=code, message=message, retryable=retryable),
         ),

@@ -83,6 +83,7 @@ def parse_search_response(
     model: str,
     response_format_requested: str = "json_object",
     response_format_accepted: bool = True,
+    backend_kind: str | None = None,
 ) -> SearchResult:
     """Parse model content into a normalized search result."""
 
@@ -97,6 +98,7 @@ def parse_search_response(
                 model=model,
                 response_format_requested=response_format_requested,
                 response_format_accepted=response_format_accepted,
+                backend_kind=backend_kind,
             )
         except ValidationError, ValueError:
             result = None
@@ -113,6 +115,7 @@ def parse_search_response(
         response_format_requested=response_format_requested,
         response_format_accepted=response_format_accepted,
         warning_codes=warning_codes,
+        backend_kind=backend_kind,
     )
 
 
@@ -148,6 +151,7 @@ def _parse_structured_payload(
     model: str,
     response_format_requested: str,
     response_format_accepted: bool,
+    backend_kind: str | None,
 ) -> SearchResult | None:
     if "summary" in payload:
         return _result_from_v2_payload(
@@ -157,6 +161,7 @@ def _parse_structured_payload(
             model=model,
             response_format_requested=response_format_requested,
             response_format_accepted=response_format_accepted,
+            backend_kind=backend_kind,
         )
 
     if "answer" in payload or "sources" in payload:
@@ -167,6 +172,7 @@ def _parse_structured_payload(
             model=model,
             response_format_requested=response_format_requested,
             response_format_accepted=response_format_accepted,
+            backend_kind=backend_kind,
         )
 
     return None
@@ -180,6 +186,7 @@ def _result_from_v2_payload(
     model: str,
     response_format_requested: str,
     response_format_accepted: bool,
+    backend_kind: str | None,
 ) -> SearchResult:
     raw_sources = payload.get("sources", [])
     if not isinstance(raw_sources, list):
@@ -239,6 +246,7 @@ def _result_from_v2_payload(
         response_format_requested=response_format_requested,
         response_format_accepted=response_format_accepted,
         warning_codes=warning_codes,
+        backend_kind=backend_kind,
     )
 
 
@@ -250,6 +258,7 @@ def _result_from_legacy_payload(
     model: str,
     response_format_requested: str,
     response_format_accepted: bool,
+    backend_kind: str | None,
 ) -> SearchResult:
     answer = str(payload.get("answer", "")).strip()
     warning_codes = _normalize_provider_warning_codes(
@@ -300,6 +309,7 @@ def _result_from_legacy_payload(
         response_format_requested=response_format_requested,
         response_format_accepted=response_format_accepted,
         warning_codes=warning_codes,
+        backend_kind=backend_kind,
     )
 
 
@@ -312,6 +322,7 @@ def _parse_text_fallback(
     response_format_requested: str,
     response_format_accepted: bool,
     warning_codes: list[str],
+    backend_kind: str | None,
 ) -> SearchResult:
     lines = [line.strip() for line in content.splitlines() if line.strip()]
     answer_lines: list[str] = []
@@ -360,6 +371,7 @@ def _parse_text_fallback(
         response_format_requested=response_format_requested,
         response_format_accepted=response_format_accepted,
         warning_codes=warning_codes,
+        backend_kind=backend_kind,
     )
 
 
@@ -632,6 +644,7 @@ def _build_result(
     response_format_requested: str,
     response_format_accepted: bool,
     warning_codes: list[str],
+    backend_kind: str | None,
 ) -> SearchResult:
     normalized_warning_codes = _dedupe_warning_codes(warning_codes)
     normalized_warning_codes = _finalize_warning_codes(
@@ -669,6 +682,7 @@ def _build_result(
         diagnostics=SearchDiagnostics(
             status=status,
             provider=ProviderInfo(name=provider, model=model),
+            backend_kind=backend_kind,
             normalization=SearchNormalizationInfo(
                 response_format_requested=(
                     "json_object"

@@ -295,6 +295,7 @@ def test_backend_search_against_fake_openai_endpoint() -> None:
         assert result.sources[0].published_at == "2026-06-15"
         assert result.diagnostics.provider.name == "openai-compatible"
         assert result.diagnostics.provider.model == "fake-search-model"
+        assert result.diagnostics.backend_kind == "openai"
         assert result.diagnostics.normalization.parse_mode == "structured_v2"
     finally:
         server.shutdown()

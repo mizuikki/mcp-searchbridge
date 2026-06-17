@@ -1,8 +1,7 @@
 # mcp-searchbridge
 
 `mcp-searchbridge` is a lightweight FastMCP server that exposes a small,
-LLM-oriented retrieval surface backed by an OpenAI-compatible Chat Completions
-endpoint.
+LLM-oriented retrieval surface backed by a configurable retrieval backend.
 
 It does not ship its own crawler, search engine, or docs index. Freshness, live
 web access, extraction fidelity, and source quality still depend on the upstream
@@ -12,7 +11,9 @@ model or gateway you configure.
 
 - FastMCP server over stdio
 - Six retrieval-oriented tools instead of a single search tool
+- Switchable `openai` and `private_http` backend modes
 - OpenAI-compatible `base_url`, `api_key`, and `model` configuration
+- Private HTTP backend adapter for enhanced internal retrieval services
 - JSON-first parsing with plain-text fallback where needed
 - Structured diagnostics, warnings, and normalized source objects
 - `uv`-managed Python 3.14 project with Ruff and pytest
@@ -44,7 +45,9 @@ uv sync --dev
 
 ## Configuration
 
-Copy `.env.example` into `.env` or set environment variables directly:
+Copy `.env.example` into `.env` or set environment variables directly.
+
+Default mode is `openai`:
 
 ```env
 OPENAI_API_KEY=your-api-key
@@ -56,14 +59,46 @@ OPENAI_ORGANIZATION=
 OPENAI_PROJECT=
 SEARCHBRIDGE_SYSTEM_PROMPT=
 SEARCHBRIDGE_DEFAULT_MAX_SOURCES=5
+SEARCHBRIDGE_BACKEND_KIND=openai
+SEARCHBRIDGE_PRIVATE_BACKEND_URL=
+SEARCHBRIDGE_PRIVATE_BACKEND_API_KEY=
+SEARCHBRIDGE_PRIVATE_BACKEND_TIMEOUT_SECONDS=30
+SEARCHBRIDGE_PRIVATE_BACKEND_FALLBACK_TO_OPENAI=false
 SEARCHBRIDGE_LOG_LEVEL=INFO
 ```
 
 Required variables:
 
-- `OPENAI_API_KEY`
-- `OPENAI_BASE_URL`
-- `OPENAI_MODEL`
+- For `SEARCHBRIDGE_BACKEND_KIND=openai`:
+  - `OPENAI_API_KEY`
+  - `OPENAI_BASE_URL`
+  - `OPENAI_MODEL`
+- For `SEARCHBRIDGE_BACKEND_KIND=private_http`:
+  - `SEARCHBRIDGE_PRIVATE_BACKEND_URL`
+
+Private backend example:
+
+```env
+SEARCHBRIDGE_BACKEND_KIND=private_http
+SEARCHBRIDGE_PRIVATE_BACKEND_URL=https://private-searchbridge.internal
+SEARCHBRIDGE_PRIVATE_BACKEND_API_KEY=private-token
+SEARCHBRIDGE_PRIVATE_BACKEND_TIMEOUT_SECONDS=30
+SEARCHBRIDGE_PRIVATE_BACKEND_FALLBACK_TO_OPENAI=true
+
+OPENAI_API_KEY=your-api-key
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_MODEL=your-model
+```
+
+`private_http` is an enhancement hook for an internal JSON API. The public MCP
+surface stays the same; the server just swaps the backend implementation behind
+the existing six tools. If `SEARCHBRIDGE_PRIVATE_BACKEND_FALLBACK_TO_OPENAI=true`,
+the OpenAI settings must still be configured so failed private calls can fall back.
+Fallback is intentionally narrow: the server only falls back for recoverable
+private-backend failures such as transport errors, 5xx responses, or explicit
+`not_implemented`/`endpoint_not_implemented` errors. Auth failures, invalid JSON,
+and response-contract mismatches are returned as structured MCP errors instead of
+being silently downgraded.
 
 `mcp-searchbridge` reads `.env` for local runs, but MCP clients such as Claude
 Code and Cursor do not automatically inherit that file. Pass the same values in
@@ -139,6 +174,7 @@ Output shape:
       "name": "openai-compatible",
       "model": "your-model"
     },
+    "backend_kind": "openai",
     "normalization": {
       "response_format_requested": "json_object",
       "response_format_accepted": true,
@@ -150,6 +186,11 @@ Output shape:
       "sources_with_evidence": 1,
       "evidence_chunks_returned": 1
     },
+    "capabilities_used": [],
+    "reproducible": null,
+    "cache_hit": null,
+    "version_locked": null,
+    "resolved_version": null,
     "warnings": [],
     "error": null
   }

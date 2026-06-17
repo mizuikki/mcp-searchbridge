@@ -43,6 +43,8 @@ from tests.helpers import make_settings, optional_url, url
 
 class FakeBackend:
     provider_name = "fake-provider"
+    provider_model = "fake-model"
+    backend_kind = "fake"
 
     def __init__(self) -> None:
         self.search_requests: list[SearchRequest] = []
@@ -84,7 +86,11 @@ class FakeBackend:
             ],
             diagnostics=SearchDiagnostics(
                 status="ok",
-                provider=ProviderInfo(name=self.provider_name, model="fake-model"),
+                provider=ProviderInfo(
+                    name=self.provider_name,
+                    model=self.provider_model,
+                ),
+                backend_kind=self.backend_kind,
                 normalization=SearchNormalizationInfo(
                     response_format_requested="json_object",
                     response_format_accepted=True,
@@ -116,7 +122,11 @@ class FakeBackend:
             likely_rewritten=True,
             diagnostics=ToolDiagnostics(
                 status="ok",
-                provider=ProviderInfo(name=self.provider_name, model="fake-model"),
+                provider=ProviderInfo(
+                    name=self.provider_name,
+                    model=self.provider_model,
+                ),
+                backend_kind=self.backend_kind,
                 warnings=[],
             ),
         )
@@ -129,7 +139,11 @@ class FakeBackend:
             sections=[OutlineSection(title="Section A", summary="Summary A")],
             diagnostics=ToolDiagnostics(
                 status="ok",
-                provider=ProviderInfo(name=self.provider_name, model="fake-model"),
+                provider=ProviderInfo(
+                    name=self.provider_name,
+                    model=self.provider_model,
+                ),
+                backend_kind=self.backend_kind,
                 warnings=[],
             ),
         )
@@ -164,7 +178,11 @@ class FakeBackend:
             ],
             diagnostics=ToolDiagnostics(
                 status="ok",
-                provider=ProviderInfo(name=self.provider_name, model="fake-model"),
+                provider=ProviderInfo(
+                    name=self.provider_name,
+                    model=self.provider_model,
+                ),
+                backend_kind=self.backend_kind,
                 warnings=[],
             ),
         )
@@ -185,7 +203,11 @@ class FakeBackend:
             ],
             diagnostics=ToolDiagnostics(
                 status="ok",
-                provider=ProviderInfo(name=self.provider_name, model="fake-model"),
+                provider=ProviderInfo(
+                    name=self.provider_name,
+                    model=self.provider_model,
+                ),
+                backend_kind=self.backend_kind,
                 warnings=[],
             ),
         )
@@ -203,7 +225,11 @@ class FakeBackend:
             rationale="Looks like llms.txt",
             diagnostics=ToolDiagnostics(
                 status="ok",
-                provider=ProviderInfo(name=self.provider_name, model="fake-model"),
+                provider=ProviderInfo(
+                    name=self.provider_name,
+                    model=self.provider_model,
+                ),
+                backend_kind=self.backend_kind,
                 warnings=[],
             ),
         )
@@ -360,3 +386,34 @@ def test_server_returns_sanitized_upstream_errors_for_all_tools(
     assert "http://" not in log_text
     assert "Could not connect to the upstream provider." not in log_text
     assert "APIConnectionError" in log_text
+
+
+def test_server_preserves_structured_upstream_error_code() -> None:
+    settings = make_settings(OPENAI_MODEL="fake-model")
+    exc = UpstreamSearchError(
+        "Private backend auth failed.",
+        retryable=False,
+        log_context=UpstreamLogContext(
+            error_type="PrivateBackendErrorResponse",
+            status_code=401,
+            request_id="req_private",
+        ),
+        error_code="backend_auth_failed",
+    )
+    backend = FailingBackend(exc)
+    server = create_server(settings=settings, backend=backend)
+
+    async def run_call() -> None:
+        result = await server._tool_manager.call_tool(
+            "search_web",
+            {
+                "query": "private auth failure",
+            },
+        )
+
+        assert result.diagnostics.error is not None
+        assert result.diagnostics.error.code == "backend_auth_failed"
+        assert result.diagnostics.error.message == "Private backend auth failed."
+        assert result.diagnostics.error.retryable is False
+
+    asyncio.run(run_call())
