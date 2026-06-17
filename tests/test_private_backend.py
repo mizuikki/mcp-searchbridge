@@ -373,7 +373,9 @@ def test_private_backend_does_not_fallback_on_invalid_json() -> None:
         server.server_close()
 
 
-def test_private_backend_does_not_fallback_on_response_model_validation_failure() -> None:
+def test_private_backend_does_not_fallback_on_response_model_validation_failure() -> (
+    None
+):
     server, _thread = _start_server(_InvalidResponseDataHandler)
     backend: PrivateHttpAggregationBackend | None = None
 
@@ -407,7 +409,9 @@ def test_private_backend_does_not_fallback_on_response_model_validation_failure(
         server.server_close()
 
 
-def test_private_backend_incomplete_structured_error_body_falls_back_to_generic_http_error() -> None:
+def test_private_backend_incomplete_error_body_falls_back_to_generic_http_error() -> (
+    None
+):
     class _IncompleteStructuredErrorHandler(_StructuredPrivateErrorHandler):
         status_code = 502
         error_body = {
