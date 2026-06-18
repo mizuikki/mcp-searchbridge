@@ -73,6 +73,11 @@ LOGGER = logging.getLogger(__name__)
 STRUCTURED_RESPONSE_FORMAT: ResponseFormatJSONObject = {"type": "json_object"}
 _STRUCTURED_OUTPUT_CACHE_LOCK = threading.Lock()
 _STRUCTURED_OUTPUT_UNSUPPORTED_CACHE: dict[tuple[str, str], bool] = {}
+_EMPTY_UPSTREAM_RESPONSE_ERROR_CODE = "empty_upstream_response"
+_RETRYABLE_EMPTY_RESPONSE_ERROR_TYPES = {
+    "EmptyStringResponse",
+    "EmptyMessageContent",
+}
 
 
 class ChatCompletionsClient(Protocol):
@@ -350,45 +355,61 @@ class OpenAIAggregationBackend:
         warning_codes: list[str] = []
         response_format_accepted = True
         structured_output_supported = self._structured_output_supported()
+        attempts_remaining = self.settings.openai_max_retries + 1
 
-        try:
-            if structured_output_supported:
-                response = self.client.chat.completions.create(
-                    model=self.provider_model,
-                    messages=messages,
-                    response_format=STRUCTURED_RESPONSE_FORMAT,
+        while attempts_remaining > 0:
+            try:
+                if structured_output_supported:
+                    response = self.client.chat.completions.create(
+                        model=self.provider_model,
+                        messages=messages,
+                        response_format=STRUCTURED_RESPONSE_FORMAT,
+                    )
+                else:
+                    response_format_accepted = False
+                    warning_codes.append("structured_output_not_supported")
+                    response = self._fallback_completion(messages)
+                return (
+                    _message_content(response),
+                    response_format_accepted,
+                    warning_codes,
                 )
-            else:
-                response_format_accepted = False
+            except UpstreamSearchError as exc:
+                if not _is_retryable_empty_response_error(exc):
+                    raise
+                attempts_remaining -= 1
+                if attempts_remaining == 0:
+                    raise
+                LOGGER.warning(
+                    "Upstream provider returned empty response content; retrying "
+                    "[error_type=%s remaining_attempts=%s]",
+                    exc.log_context.error_type,
+                    attempts_remaining,
+                )
+            except openai.BadRequestError as exc:
+                if not _is_structured_output_unsupported_error(exc):
+                    raise _build_upstream_error(exc) from exc
+
+                LOGGER.warning(
+                    "Structured response rejected by upstream provider; retrying "
+                    "plain text."
+                )
                 warning_codes.append("structured_output_not_supported")
-                response = self._fallback_completion(messages)
-            return _message_content(response), response_format_accepted, warning_codes
-        except openai.BadRequestError as exc:
-            if not _is_structured_output_unsupported_error(exc):
+                response_format_accepted = False
+                structured_output_supported = False
+                _mark_structured_output_unsupported(self._structured_output_cache_key)
+            except (
+                openai.APIConnectionError,
+                openai.APITimeoutError,
+                openai.AuthenticationError,
+                openai.RateLimitError,
+                openai.APIStatusError,
+            ) as exc:
+                raise _build_upstream_error(exc) from exc
+            except openai.OpenAIError as exc:
                 raise _build_upstream_error(exc) from exc
 
-            LOGGER.warning(
-                "Structured response rejected by upstream provider; retrying "
-                "plain text."
-            )
-            warning_codes.append("structured_output_not_supported")
-            response_format_accepted = False
-            _mark_structured_output_unsupported(self._structured_output_cache_key)
-            return (
-                self._fallback_completion(messages),
-                response_format_accepted,
-                warning_codes,
-            )
-        except (
-            openai.APIConnectionError,
-            openai.APITimeoutError,
-            openai.AuthenticationError,
-            openai.RateLimitError,
-            openai.APIStatusError,
-        ) as exc:
-            raise _build_upstream_error(exc) from exc
-        except openai.OpenAIError as exc:
-            raise _build_upstream_error(exc) from exc
+        raise RuntimeError("OpenAI retry loop exhausted without returning or raising")
 
     def _fallback_completion(self, messages: list[ChatCompletionMessageParam]) -> str:
         try:
@@ -424,8 +445,9 @@ def _message_content(response: Any) -> str:
             return content
         raise UpstreamSearchError(
             "Upstream string response content was empty.",
-            retryable=False,
+            retryable=True,
             log_context=UpstreamLogContext(error_type="EmptyStringResponse"),
+            error_code=_EMPTY_UPSTREAM_RESPONSE_ERROR_CODE,
         )
 
     try:
@@ -442,8 +464,17 @@ def _message_content(response: Any) -> str:
         return content
     raise UpstreamSearchError(
         "Upstream response message content was empty.",
-        retryable=False,
+        retryable=True,
         log_context=UpstreamLogContext(error_type="EmptyMessageContent"),
+        error_code=_EMPTY_UPSTREAM_RESPONSE_ERROR_CODE,
+    )
+
+
+def _is_retryable_empty_response_error(exc: UpstreamSearchError) -> bool:
+    return (
+        exc.retryable
+        and exc.error_code == _EMPTY_UPSTREAM_RESPONSE_ERROR_CODE
+        and exc.log_context.error_type in _RETRYABLE_EMPTY_RESPONSE_ERROR_TYPES
     )
 
 

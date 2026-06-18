@@ -267,6 +267,75 @@ class _GenericBadRequestHandler(BaseHTTPRequestHandler):
         return
 
 
+class _RetryingEmptyContentHandler(BaseHTTPRequestHandler):
+    request_count = 0
+    empty_attempts_before_success = 1
+    empty_mode = "string"
+
+    def do_POST(self) -> None:  # noqa: N802
+        if self.path != "/v1/chat/completions":
+            self.send_response(404)
+            self.end_headers()
+            return
+
+        type(self).request_count += 1
+        length = int(self.headers["Content-Length"])
+        payload = json.loads(self.rfile.read(length).decode("utf-8"))
+
+        if type(self).request_count <= type(self).empty_attempts_before_success:
+            message_content = "   " if type(self).empty_mode == "string" else None
+        else:
+            message_content = json.dumps(
+                {
+                    "summary": {
+                        "text": "Recovered after retry",
+                        "citations": [
+                            {
+                                "source_id": "source_1",
+                                "chunk_id": "source_1_chunk_1",
+                            }
+                        ],
+                    },
+                    "sources": [
+                        {
+                            "source_id": "source_1",
+                            "title": "Recovered Source",
+                            "url": "https://example.com/recovered",
+                            "published_at": "2026-06-18",
+                            "evidence": [
+                                {
+                                    "chunk_id": "source_1_chunk_1",
+                                    "text": "Recovered snippet",
+                                }
+                            ],
+                        }
+                    ],
+                    "warnings": [],
+                }
+            )
+
+        response = {
+            "id": "chatcmpl-empty-retry",
+            "object": "chat.completion",
+            "created": 1,
+            "model": payload["model"],
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": message_content},
+                    "finish_reason": "stop",
+                }
+            ],
+        }
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(response).encode("utf-8"))
+
+    def log_message(self, format: str, *args: object) -> None:  # noqa: A003
+        return
+
+
 def test_backend_search_against_fake_openai_endpoint() -> None:
     server = ThreadingHTTPServer(("127.0.0.1", 0), _ChatCompletionsHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -453,6 +522,64 @@ def test_backend_connection_errors_are_sanitized() -> None:
     assert "192.168.5.1" not in exc.client_message
     assert "23000" not in exc.client_message
     assert "http://" not in exc.client_message
+
+
+def test_backend_retries_empty_string_responses() -> None:
+    _RetryingEmptyContentHandler.request_count = 0
+    _RetryingEmptyContentHandler.empty_attempts_before_success = 1
+    _RetryingEmptyContentHandler.empty_mode = "string"
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _RetryingEmptyContentHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        host, port = host_port(server.server_address)
+        settings = make_settings(
+            OPENAI_BASE_URL=f"http://{host}:{port}/v1",
+            OPENAI_MODEL="fake-search-model",
+            OPENAI_MAX_RETRIES=1,
+        )
+        backend = OpenAIAggregationBackend(settings)
+
+        result = backend.search_web(SearchRequest(query="retry empty string"))
+
+        assert result.summary.text == "Recovered after retry"
+        assert str(result.sources[0].url) == "https://example.com/recovered"
+        assert _RetryingEmptyContentHandler.request_count == 2
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_backend_retries_empty_message_content_until_exhausted() -> None:
+    _RetryingEmptyContentHandler.request_count = 0
+    _RetryingEmptyContentHandler.empty_attempts_before_success = 3
+    _RetryingEmptyContentHandler.empty_mode = "message"
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _RetryingEmptyContentHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        host, port = host_port(server.server_address)
+        settings = make_settings(
+            OPENAI_BASE_URL=f"http://{host}:{port}/v1",
+            OPENAI_MODEL="fake-search-model",
+            OPENAI_MAX_RETRIES=1,
+        )
+        backend = OpenAIAggregationBackend(settings)
+
+        with pytest.raises(UpstreamSearchError) as exc_info:
+            backend.search_web(SearchRequest(query="retry empty message"))
+
+        exc = exc_info.value
+        assert exc.client_message == "Upstream response message content was empty."
+        assert exc.retryable is True
+        assert exc.error_code == "empty_upstream_response"
+        assert exc.log_context.error_type == "EmptyMessageContent"
+        assert _RetryingEmptyContentHandler.request_count == 2
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 def test_backend_marks_404_like_pages_as_empty_or_partial() -> None:
