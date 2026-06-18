@@ -12,6 +12,7 @@ This repository is a small Python MCP server managed with `uv`.
 - `src/mcp_searchbridge/`: application code
 - `tests/`: pytest test suite
 - `.github/workflows/ci.yml`: CI for lint and tests
+- `Dockerfile`: container image for packaging the `mcp-searchbridge` server
 - `pyproject.toml`: dependencies, Ruff config, project metadata
 - `tmp/`: local experiment output only; do not commit generated files
 
@@ -21,6 +22,7 @@ Keep new runtime code under `src/mcp_searchbridge/`. Add tests alongside the rel
 - `uv sync --dev`: install runtime and dev dependencies
 - `uv run mcp-searchbridge`: run the MCP server over stdio
 - `uv run python -m mcp_searchbridge.server`: run the server module directly
+- `docker build -t mcp-searchbridge .`: build the repo's container image
 - `uv run ruff check .`: run lint checks
 - `uv run ruff format --check .`: verify formatting
 - `uv run ruff check --fix . && uv run ruff format .`: apply auto-fixes
@@ -40,6 +42,11 @@ Formatting and linting are enforced by Ruff. The repository uses a pragmatic rul
 
 ## Testing Guidelines
 Use `pytest` and `pytest-asyncio`. Name test files `test_*.py` and test functions `test_*`. Prefer small, behavior-focused tests with local fake HTTP handlers instead of hitting real upstream services by default.
+
+Repository-specific test layering:
+
+- `tests/test_private_backend_real_integration.py` is a local source-tree API contract smoke test for `mcp-searchbridge -> private_http -> searchbridge-core-api`. It does not prove split API/worker shared-infra behavior.
+- `tests/test_compose_real_topology.py` is the canonical verification path for split topology behavior. Use it for claims about shared Postgres, shared Redis, shared blob storage, worker job consumption, sync, dedup, or other cross-process behavior.
 
 Before opening a PR, run:
 

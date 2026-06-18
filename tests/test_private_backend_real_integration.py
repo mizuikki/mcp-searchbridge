@@ -6,13 +6,16 @@ import httpx
 from mcp.client.session import ClientSession
 from mcp.client.stdio import stdio_client
 
-from tests.helpers import local_mcp_server_params, run_local_searchbridge_core
+from tests.helpers import local_mcp_server_params, run_local_searchbridge_core_api
 
 PRIVATE_TOKEN = "integration-secret-token"
 
 
 def test_private_http_real_integration_happy_paths() -> None:
-    with run_local_searchbridge_core(api_token=PRIVATE_TOKEN) as private_backend:
+    with run_local_searchbridge_core_api(api_token=PRIVATE_TOKEN) as private_backend:
+        assert private_backend["api_process"].cwd.name == "searchbridge-core"
+        assert private_backend["api_process"].command[-1] == "searchbridge-core-api"
+
         server_params = local_mcp_server_params(
             env_overrides={
                 "SEARCHBRIDGE_BACKEND_KIND": "private_http",
@@ -68,6 +71,8 @@ def test_private_http_real_integration_happy_paths() -> None:
                 assert extract is not None
                 assert extract["diagnostics"]["backend_kind"] == "private_http"
                 assert extract["content_format"] == "markdown"
+                assert extract["diagnostics"]["source_id"] == "source_2"
+                assert extract["diagnostics"]["retrieval_method"] == "registry_blob"
 
                 outline_result = await session.call_tool(
                     "outline_url",
@@ -81,6 +86,7 @@ def test_private_http_real_integration_happy_paths() -> None:
                 assert outline is not None
                 assert outline["diagnostics"]["backend_kind"] == "private_http"
                 assert len(outline["sections"]) >= 1
+                assert outline["diagnostics"]["source_id"] == "source_2"
 
                 docs_result = await session.call_tool(
                     "docs_qa",
@@ -99,6 +105,10 @@ def test_private_http_real_integration_happy_paths() -> None:
                     docs["request"]["question"]
                     == "How does field_validator work in Pydantic v2?"
                 )
+                assert docs["diagnostics"]["source_id"] == "source_1"
+                assert docs["diagnostics"]["platform_kind"] == "docusaurus"
+                assert docs["diagnostics"]["selected_document_ids"]
+                assert docs["diagnostics"]["selected_chunk_ids"]
 
                 official_docs_result = await session.call_tool(
                     "find_official_docs",
@@ -110,6 +120,7 @@ def test_private_http_real_integration_happy_paths() -> None:
                 assert official_docs["diagnostics"]["backend_kind"] == "private_http"
                 assert official_docs["matches"]
                 assert len(official_docs["matches"]) == 2
+                assert official_docs["diagnostics"]["source_id"] == "source_1"
 
                 resolve_result = await session.call_tool(
                     "resolve_doc_source",
@@ -120,12 +131,13 @@ def test_private_http_real_integration_happy_paths() -> None:
                 assert resolved is not None
                 assert resolved["diagnostics"]["backend_kind"] == "private_http"
                 assert resolved["source_type"] == "page_url"
+                assert resolved["diagnostics"]["retrieval_method"] == "registry_url_lookup"
 
         asyncio.run(run_happy_paths())
 
 
 def test_private_http_real_integration_auth_failure_surfaces_structured_error() -> None:
-    with run_local_searchbridge_core(api_token=PRIVATE_TOKEN) as private_backend:
+    with run_local_searchbridge_core_api(api_token=PRIVATE_TOKEN) as private_backend:
         server_params = local_mcp_server_params(
             env_overrides={
                 "SEARCHBRIDGE_BACKEND_KIND": "private_http",
@@ -164,7 +176,7 @@ def test_private_http_real_integration_auth_failure_surfaces_structured_error() 
 def test_private_http_real_integration_not_implemented_surfaces_structured_error() -> (
     None
 ):
-    with run_local_searchbridge_core(api_token=PRIVATE_TOKEN) as private_backend:
+    with run_local_searchbridge_core_api(api_token=PRIVATE_TOKEN) as private_backend:
         bad_base_url = f"{private_backend['base_url']}/missing-prefix"
         server_params = local_mcp_server_params(
             env_overrides={
@@ -200,7 +212,7 @@ def test_private_http_real_integration_not_implemented_surfaces_structured_error
 
 
 def test_private_backend_direct_http_request_id_is_echoed() -> None:
-    with run_local_searchbridge_core(api_token=PRIVATE_TOKEN) as private_backend:
+    with run_local_searchbridge_core_api(api_token=PRIVATE_TOKEN) as private_backend:
         request_id = "integration-request-id"
         response = httpx.get(
             f"{private_backend['base_url']}/v1/capabilities",
@@ -218,7 +230,7 @@ def test_private_backend_direct_http_request_id_is_echoed() -> None:
 def test_private_http_real_integration_docs_qa_accepts_path_like_domain_allowlist() -> (
     None
 ):
-    with run_local_searchbridge_core(api_token=PRIVATE_TOKEN) as private_backend:
+    with run_local_searchbridge_core_api(api_token=PRIVATE_TOKEN) as private_backend:
         server_params = local_mcp_server_params(
             env_overrides={
                 "SEARCHBRIDGE_BACKEND_KIND": "private_http",

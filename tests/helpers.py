@@ -17,6 +17,14 @@ from mcp_searchbridge.type_utils import parse_http_url, parse_optional_http_url
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SEARCHBRIDGE_CORE_ROOT = REPO_ROOT.parent / "searchbridge-core"
+SEARCHBRIDGE_CORE_BOOTSTRAP_FIXTURE = (
+    SEARCHBRIDGE_CORE_ROOT
+    / "crates"
+    / "searchbridge-core"
+    / "tests"
+    / "fixtures"
+    / "bootstrap_sources.json"
+)
 
 
 def make_settings(**overrides: Any) -> Settings:
@@ -90,50 +98,66 @@ class ManagedProcess:
 
 
 @contextmanager
-def run_local_searchbridge_core(
+def run_local_searchbridge_core_api(
     *,
     api_token: str,
     timeout_seconds: int = 5,
 ):
-    port = find_free_port()
+    """Start only the local private API for contract smoke tests.
+
+    This helper intentionally does not provision shared Postgres/Redis/blob
+    storage and therefore does not validate the split API/worker topology.
+    The canonical shared-infra verification path lives in the compose smoke
+    tests.
+    """
+    api_port = find_free_port()
     env = os.environ.copy()
     env.update(
         {
             "SEARCHBRIDGE_CORE_HOST": "127.0.0.1",
-            "SEARCHBRIDGE_CORE_PORT": str(port),
             "SEARCHBRIDGE_CORE_API_TOKEN": api_token,
             "SEARCHBRIDGE_CORE_TIMEOUT_SECONDS": str(timeout_seconds),
             "SEARCHBRIDGE_CORE_LOG_LEVEL": "info",
+            "SEARCHBRIDGE_CORE_BOOTSTRAP_SEED_PATH": str(
+                SEARCHBRIDGE_CORE_BOOTSTRAP_FIXTURE
+            ),
         }
     )
-    command = ("cargo", "run", "-p", "searchbridge-core")
-    process = ManagedProcess(
-        name="searchbridge-core",
-        command=command,
+    api_command = (
+        "cargo",
+        "run",
+        "-p",
+        "searchbridge-core",
+        "--bin",
+        "searchbridge-core-api",
+    )
+    api_env = env | {"SEARCHBRIDGE_CORE_PORT": str(api_port)}
+    api_process = ManagedProcess(
+        name="searchbridge-core-api",
+        command=api_command,
         cwd=SEARCHBRIDGE_CORE_ROOT,
         process=subprocess.Popen(
-            command,
+            api_command,
             cwd=SEARCHBRIDGE_CORE_ROOT,
-            env=env,
+            env=api_env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
         ),
     )
-
     try:
         wait_for_private_backend_ready(
-            base_url=f"http://127.0.0.1:{port}",
+            base_url=f"http://127.0.0.1:{api_port}",
             api_token=api_token,
-            process=process,
+            process=api_process,
         )
         yield {
-            "base_url": f"http://127.0.0.1:{port}",
-            "port": port,
-            "process": process,
+            "base_url": f"http://127.0.0.1:{api_port}",
+            "port": api_port,
+            "api_process": api_process,
         }
     finally:
-        process.stop()
+        api_process.stop()
 
 
 def local_mcp_server_params(

@@ -175,6 +175,13 @@ class ToolDiagnostics(BaseModel):
     cache_hit: bool | None = None
     version_locked: bool | None = None
     resolved_version: str | None = None
+    source_id: str | None = None
+    source_version_id: str | None = None
+    platform_kind: str | None = None
+    selected_document_ids: list[str] = Field(default_factory=list)
+    selected_chunk_ids: list[str] = Field(default_factory=list)
+    discovery_used: bool | None = None
+    retrieval_method: str | None = None
     warnings: list[WarningInfo] = Field(default_factory=list)
     error: ErrorInfo | None = None
 

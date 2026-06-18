@@ -112,6 +112,23 @@ uv run mcp-searchbridge
 
 This starts the MCP server on stdio.
 
+## Container
+
+This repository also includes a top-level `Dockerfile` for packaging the
+`mcp-searchbridge` server itself as a container image.
+
+The image:
+
+- installs project dependencies with `uv`
+- copies this repository into the image
+- starts the MCP server with `uv run mcp-searchbridge`
+
+Build example:
+
+```bash
+docker build -t mcp-searchbridge .
+```
+
 ## Tools
 
 ### `search_web`
@@ -426,3 +443,21 @@ uv run ruff check .
 uv run ruff format --check .
 uv run pytest
 ```
+
+## Verification Layers
+
+This repository currently uses two different verification layers for the
+`private_http` path:
+
+- `tests/test_private_backend_real_integration.py` is a local source-tree API
+  contract smoke test. It starts the public MCP server from this repo and the
+  private API from the sibling `searchbridge-core` repo, but it does not
+  provision shared Postgres, Redis, or blob storage.
+- `tests/test_compose_real_topology.py` is the canonical split-topology
+  verification path. It validates the real `mcp-searchbridge` +
+  `searchbridge-core-api` + `searchbridge-core-worker` + shared Postgres +
+  shared Redis + shared blob storage stack from workspace sources.
+
+Use the compose topology test when you need evidence that worker job
+consumption, shared-state retrieval, sync, dedup, or other cross-process
+behavior is actually working.
