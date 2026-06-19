@@ -42,6 +42,7 @@ WARNING_MESSAGES = {
     "structured_output_not_supported": (
         "Upstream provider rejected JSON response_format."
     ),
+    "model_fallback_used": "The request succeeded after switching to a fallback model.",
     "legacy_response_shape_used": (
         "Upstream response matched the legacy answer/sources shape."
     ),

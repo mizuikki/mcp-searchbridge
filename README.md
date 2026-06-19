@@ -13,6 +13,7 @@ model or gateway you configure.
 - Six retrieval-oriented tools instead of a single search tool
 - Switchable `openai` and `private_http` backend modes
 - OpenAI-compatible `base_url`, `api_key`, and `model` configuration
+- Ordered model fallback chain via comma-separated `OPENAI_MODEL`
 - Private HTTP backend adapter for enhanced internal retrieval services
 - JSON-first parsing with plain-text fallback where needed
 - Structured diagnostics, warnings, and normalized source objects
@@ -52,7 +53,7 @@ Default mode is `openai`:
 ```env
 OPENAI_API_KEY=your-api-key
 OPENAI_BASE_URL=https://api.openai.com/v1
-OPENAI_MODEL=your-model
+OPENAI_MODEL=your-primary-model,your-fallback-model
 OPENAI_TIMEOUT_SECONDS=180
 OPENAI_MAX_RETRIES=2
 OPENAI_ORGANIZATION=
@@ -76,6 +77,10 @@ Required variables:
 - For `SEARCHBRIDGE_BACKEND_KIND=private_http`:
   - `SEARCHBRIDGE_PRIVATE_BACKEND_URL`
 
+`OPENAI_MODEL` accepts either a single model or a comma-separated fallback
+chain. The first model is primary; later models are attempted in order only
+after the current model exhausts retryable failures.
+
 Private backend example:
 
 ```env
@@ -87,7 +92,7 @@ SEARCHBRIDGE_PRIVATE_BACKEND_FALLBACK_TO_OPENAI=true
 
 OPENAI_API_KEY=your-api-key
 OPENAI_BASE_URL=https://api.openai.com/v1
-OPENAI_MODEL=your-model
+OPENAI_MODEL=your-primary-model,your-fallback-model
 ```
 
 `private_http` is an enhancement hook for an internal JSON API. The public MCP
@@ -403,7 +408,7 @@ For local development from this repository checkout:
       "env": {
         "OPENAI_API_KEY": "your-api-key",
         "OPENAI_BASE_URL": "https://api.openai.com/v1",
-        "OPENAI_MODEL": "your-model"
+        "OPENAI_MODEL": "your-primary-model,your-fallback-model"
       }
     }
   }
@@ -425,7 +430,7 @@ For running directly from GitHub without publishing to PyPI:
       "env": {
         "OPENAI_API_KEY": "your-api-key",
         "OPENAI_BASE_URL": "https://api.openai.com/v1",
-        "OPENAI_MODEL": "your-model"
+        "OPENAI_MODEL": "your-primary-model,your-fallback-model"
       }
     }
   }

@@ -8,6 +8,7 @@ import random
 import re
 import threading
 import time
+from dataclasses import dataclass
 from typing import Any, Protocol, cast
 from urllib.parse import urlparse
 
@@ -87,6 +88,15 @@ _JSON_CODE_BLOCK_PATTERN = re.compile(
     r"```(?:json)?\s*(.*?)```",
     re.IGNORECASE | re.DOTALL,
 )
+_MODEL_FALLBACK_WARNING_CODE = "model_fallback_used"
+_FALLBACK_TRIGGER_BY_ERROR_TYPE = {
+    "RateLimitError": "rate_limited",
+    "APITimeoutError": "timeout",
+    "APIConnectionError": "connection_failed",
+    "APIStatusError": "server_error",
+    "EmptyStringResponse": _EMPTY_UPSTREAM_RESPONSE_ERROR_CODE,
+    "EmptyMessageContent": _EMPTY_UPSTREAM_RESPONSE_ERROR_CODE,
+}
 
 
 class ChatCompletionsClient(Protocol):
@@ -107,6 +117,17 @@ class OpenAIClient(Protocol):
     chat: ChatNamespace
 
 
+@dataclass(slots=True, frozen=True)
+class ToolCallOutcome:
+    content: str
+    response_format_accepted: bool
+    warning_codes: list[str]
+    provider: ProviderInfo
+    attempted_models: list[str]
+    fallback_count: int
+    fallback_trigger: str | None
+
+
 class OpenAIAggregationBackend:
     """Bridge multiple MCP retrieval tools into an OpenAI-compatible provider."""
 
@@ -116,6 +137,7 @@ class OpenAIAggregationBackend:
     def __init__(self, settings: Settings, client: OpenAIClient | None = None) -> None:
         self.settings = settings
         self.provider_model = settings.resolved_openai_model
+        self.provider_models = settings.resolved_openai_models
         self.client = client or OpenAI(
             api_key=settings.resolved_openai_api_key,
             base_url=str(settings.resolved_openai_base_url),
@@ -124,43 +146,39 @@ class OpenAIAggregationBackend:
             timeout=settings.openai_timeout_seconds,
             max_retries=settings.openai_max_retries,
         )
-        self._structured_output_cache_key = (
-            str(settings.resolved_openai_base_url),
-            settings.resolved_openai_model,
-        )
 
     def search_web(self, request: SearchRequest) -> SearchResult:
         """Call the upstream provider for search/discovery."""
 
-        content, response_format_accepted, warning_codes = self._call_json_tool(
+        outcome = self._call_json_tool(
             build_search_user_prompt(request)
         )
         result = parse_search_response(
-            content=content,
+            content=outcome.content,
             request=request,
             provider=self.provider_name,
-            model=self.provider_model,
+            model=outcome.provider.model,
             response_format_requested="json_object",
-            response_format_accepted=response_format_accepted,
+            response_format_accepted=outcome.response_format_accepted,
             backend_kind=self.backend_kind,
         )
-        _append_warning_codes(result.diagnostics, warning_codes)
+        _append_tool_call_metadata(result.diagnostics, outcome)
         return result
 
     def extract_url(self, request: ExtractUrlRequest) -> ExtractResult:
         """Call the upstream provider for URL extraction."""
 
-        content, _, warning_codes = self._call_json_tool(
+        outcome = self._call_json_tool(
             build_extract_user_prompt(request)
         )
-        payload = _extract_json_payload(content)
+        payload = _extract_json_payload(outcome.content)
         title = _safe_text(payload.get("title", "")) if payload else ""
         url = (
             _safe_text(payload.get("url", str(request.url)))
             if payload
             else str(request.url)
         )
-        body = _safe_text(payload.get("content", "")) if payload else content
+        body = _safe_text(payload.get("content", "")) if payload else outcome.content
         content_format = _safe_literal(
             payload.get("content_format") if payload else None,
             {"text", "markdown"},
@@ -170,11 +188,12 @@ class OpenAIAggregationBackend:
         likely_rewritten = (
             bool(payload.get("likely_rewritten", True)) if payload else True
         )
+        warning_codes = list(outcome.warning_codes)
         warning_codes.extend(
             _collect_warning_codes(payload.get("warnings", [])) if payload else []
         )
         warning_codes.extend(_extract_warning_codes(body))
-        return ExtractResult(
+        result = ExtractResult(
             request=ExtractRequestEcho(
                 url=request.url,
                 mode=request.mode,
@@ -187,21 +206,23 @@ class OpenAIAggregationBackend:
             truncated=truncated,
             likely_rewritten=likely_rewritten,
             diagnostics=_tool_diagnostics(
-                provider=self._provider_info(),
+                provider=outcome.provider,
                 warning_codes=warning_codes,
                 status=_extract_status(body),
                 backend_kind=self.backend_kind,
             ),
         )
+        _set_tool_call_metadata(result.diagnostics, outcome)
+        return result
 
     def outline_url(self, request: OutlineUrlRequest) -> OutlineResult:
         """Call the upstream provider for URL outline generation."""
 
-        content, _, warning_codes = self._call_json_tool(
+        outcome = self._call_json_tool(
             build_outline_user_prompt(request)
         )
-        body = content
-        payload = _extract_json_payload(content)
+        body = outcome.content
+        payload = _extract_json_payload(outcome.content)
         sections_payload = payload.get("sections", []) if payload else []
         sections: list[OutlineSection] = []
         if isinstance(sections_payload, list):
@@ -217,58 +238,68 @@ class OpenAIAggregationBackend:
                         summary=_safe_text(item.get("summary", "")),
                     )
                 )
+        warning_codes = list(outcome.warning_codes)
         warning_codes.extend(
             _collect_warning_codes(payload.get("warnings", [])) if payload else []
         )
         warning_codes.extend(_outline_warning_codes(body, sections))
-        return OutlineResult(
+        result = OutlineResult(
             request=OutlineRequestEcho(url=request.url, depth=request.depth),
             title=_safe_text(payload.get("title", "")) if payload else "",
             sections=sections,
             diagnostics=_tool_diagnostics(
-                provider=self._provider_info(),
+                provider=outcome.provider,
                 warning_codes=warning_codes,
                 status=_outline_status(
                     title=_safe_text(payload.get("title", "")) if payload else "",
                     sections=sections,
-                    body=content,
+                    body=outcome.content,
                 ),
                 backend_kind=self.backend_kind,
             ),
         )
+        _set_tool_call_metadata(result.diagnostics, outcome)
+        return result
 
     def docs_qa(self, request: DocsQARequest) -> DocsQAResult:
         """Call the upstream provider for docs question answering."""
 
-        content, _, warning_codes = self._call_json_tool(
+        outcome = self._call_json_tool(
             build_docs_qa_user_prompt(request)
         )
-        payload = _extract_json_payload(content)
+        payload = _extract_json_payload(outcome.content)
         sources = _parse_sources_from_payload(
             payload=payload,
             domain_allowlist=request.domain_allowlist,
         )
         citations = _parse_citations_from_payload(payload=payload)
+        warning_codes = list(outcome.warning_codes)
         warning_codes.extend(
             _collect_warning_codes(payload.get("warnings", [])) if payload else []
         )
-        return DocsQAResult(
+        result = DocsQAResult(
             request=DocsQARequestEcho(
                 question=request.question,
                 url=request.url,
                 domain_allowlist=request.domain_allowlist,
                 answer_mode=request.answer_mode,
             ),
-            answer=_safe_text(payload.get("answer", "")) if payload else content,
+            answer=(
+                _safe_text(payload.get("answer", ""))
+                if payload
+                else outcome.content
+            ),
             citations=citations,
             sources=sources,
             diagnostics=_tool_diagnostics(
-                provider=self._provider_info(),
+                provider=outcome.provider,
                 warning_codes=warning_codes,
                 status="ok" if sources else "partial",
                 backend_kind=self.backend_kind,
             ),
         )
+        _set_tool_call_metadata(result.diagnostics, outcome)
+        return result
 
     def find_official_docs(
         self,
@@ -276,10 +307,10 @@ class OpenAIAggregationBackend:
     ) -> OfficialDocsResult:
         """Call the upstream provider for official docs discovery."""
 
-        content, _, warning_codes = self._call_json_tool(
+        outcome = self._call_json_tool(
             build_find_official_docs_user_prompt(request)
         )
-        payload = _extract_json_payload(content)
+        payload = _extract_json_payload(outcome.content)
         matches_payload = payload.get("matches", []) if payload else []
         matches: list[OfficialDocMatch] = []
         if isinstance(matches_payload, list):
@@ -298,22 +329,25 @@ class OpenAIAggregationBackend:
                         rationale=_safe_text(item.get("rationale", "")),
                     )
                 )
+        warning_codes = list(outcome.warning_codes)
         warning_codes.extend(
             _collect_warning_codes(payload.get("warnings", [])) if payload else []
         )
-        return OfficialDocsResult(
+        result = OfficialDocsResult(
             request=OfficialDocsRequestEcho(
                 query=request.query,
                 max_results=request.max_results,
             ),
             matches=matches,
             diagnostics=_tool_diagnostics(
-                provider=self._provider_info(),
+                provider=outcome.provider,
                 warning_codes=warning_codes,
                 status="ok" if matches else "empty",
                 backend_kind=self.backend_kind,
             ),
         )
+        _set_tool_call_metadata(result.diagnostics, outcome)
+        return result
 
     def resolve_doc_source(
         self,
@@ -321,10 +355,10 @@ class OpenAIAggregationBackend:
     ) -> DocSourceResolutionResult:
         """Call the upstream provider for source resolution."""
 
-        content, _, warning_codes = self._call_json_tool(
+        outcome = self._call_json_tool(
             build_resolve_doc_source_user_prompt(request)
         )
-        payload = _extract_json_payload(content)
+        payload = _extract_json_payload(outcome.content)
         source_type = _safe_literal(
             payload.get("source_type") if payload else None,
             {"llms_txt", "page_url", "library_docs_query", "web_search_query"},
@@ -334,25 +368,30 @@ class OpenAIAggregationBackend:
             _safe_optional_url(payload.get("resolved_url")) if payload else None
         )
         confidence = _safe_confidence(payload.get("confidence")) if payload else 0.5
-        rationale = _safe_text(payload.get("rationale", "")) if payload else content
+        rationale = (
+            _safe_text(payload.get("rationale", "")) if payload else outcome.content
+        )
+        warning_codes = list(outcome.warning_codes)
         warning_codes.extend(
             _collect_warning_codes(payload.get("warnings", [])) if payload else []
         )
-        return DocSourceResolutionResult(
+        result = DocSourceResolutionResult(
             request=DocSourceResolutionRequestEcho(query_or_url=request.query_or_url),
             source_type=cast(DocSourceType, source_type),
             resolved_url=parse_optional_http_url(resolved_url),
             confidence=confidence,
             rationale=rationale,
             diagnostics=_tool_diagnostics(
-                provider=self._provider_info(),
+                provider=outcome.provider,
                 warning_codes=warning_codes,
                 status="ok",
                 backend_kind=self.backend_kind,
             ),
         )
+        _set_tool_call_metadata(result.diagnostics, outcome)
+        return result
 
-    def _call_json_tool(self, user_prompt: str) -> tuple[str, bool, list[str]]:
+    def _call_json_tool(self, user_prompt: str) -> ToolCallOutcome:
         messages: list[ChatCompletionMessageParam] = [
             ChatCompletionSystemMessageParam(
                 role="system",
@@ -361,23 +400,81 @@ class OpenAIAggregationBackend:
             ChatCompletionUserMessageParam(role="user", content=user_prompt),
         ]
 
+        attempted_models: list[str] = []
+        fallback_trigger: str | None = None
+        last_exc: UpstreamSearchError | None = None
+
+        for model_name in self.provider_models:
+            attempted_models.append(model_name)
+            try:
+                content, response_format_accepted, warning_codes = (
+                    self._call_model_json_tool(
+                    messages=messages,
+                    model_name=model_name,
+                    )
+                )
+                return ToolCallOutcome(
+                    content=content,
+                    response_format_accepted=response_format_accepted,
+                    warning_codes=_augment_warning_codes_for_fallback(
+                        warning_codes=warning_codes,
+                        fallback_count=max(len(attempted_models) - 1, 0),
+                    ),
+                    provider=self._provider_info(model_name),
+                    attempted_models=list(attempted_models),
+                    fallback_count=max(len(attempted_models) - 1, 0),
+                    fallback_trigger=fallback_trigger,
+                )
+            except UpstreamSearchError as exc:
+                last_exc = exc
+                if not exc.retryable:
+                    raise _with_attempted_models(
+                        exc,
+                        attempted_models=attempted_models,
+                        fallback_trigger=fallback_trigger,
+                    ) from exc
+                if model_name == self.provider_models[-1]:
+                    raise _with_attempted_models(
+                        exc,
+                        attempted_models=attempted_models,
+                        fallback_trigger=fallback_trigger,
+                    ) from exc
+                fallback_trigger = _fallback_trigger_for_error(exc)
+
+        if last_exc is not None:
+            raise _with_attempted_models(
+                last_exc,
+                attempted_models=attempted_models,
+                fallback_trigger=fallback_trigger,
+            )
+        raise RuntimeError("OpenAI model chain exhausted without returning or raising")
+
+    def _call_model_json_tool(
+        self,
+        *,
+        messages: list[ChatCompletionMessageParam],
+        model_name: str,
+    ) -> tuple[str, bool, list[str]]:
         warning_codes: list[str] = []
         response_format_accepted = True
-        structured_output_supported = self._structured_output_supported()
+        structured_output_supported = self._structured_output_supported(model_name)
         attempts_remaining = self.settings.openai_max_retries + 1
 
         while attempts_remaining > 0:
             try:
                 if structured_output_supported:
                     response = self.client.chat.completions.create(
-                        model=self.provider_model,
+                        model=model_name,
                         messages=messages,
                         response_format=STRUCTURED_RESPONSE_FORMAT,
                     )
                 else:
                     response_format_accepted = False
                     warning_codes.append("structured_output_not_supported")
-                    response = self._fallback_completion(messages)
+                    response = self._fallback_completion(
+                        messages,
+                        model_name=model_name,
+                    )
                 return (
                     _message_content(response),
                     response_format_accepted,
@@ -385,15 +482,16 @@ class OpenAIAggregationBackend:
                 )
             except UpstreamSearchError as exc:
                 if not _is_retryable_empty_response_error(exc):
-                    raise
+                    raise exc
                 attempts_remaining -= 1
                 if attempts_remaining == 0:
-                    raise
+                    raise exc
                 retries_taken = self.settings.openai_max_retries - attempts_remaining
                 delay_seconds = _calculate_empty_response_retry_delay(retries_taken)
                 LOGGER.warning(
                     "Upstream provider returned empty response content; retrying "
-                    "[error_type=%s remaining_attempts=%s delay_seconds=%.6f]",
+                    "[model=%s error_type=%s remaining_attempts=%s delay_seconds=%.6f]",
+                    model_name,
                     exc.log_context.error_type,
                     attempts_remaining,
                     delay_seconds,
@@ -405,12 +503,15 @@ class OpenAIAggregationBackend:
 
                 LOGGER.warning(
                     "Structured response rejected by upstream provider; retrying "
-                    "plain text."
+                    "plain text [model=%s].",
+                    model_name,
                 )
                 warning_codes.append("structured_output_not_supported")
                 response_format_accepted = False
                 structured_output_supported = False
-                _mark_structured_output_unsupported(self._structured_output_cache_key)
+                _mark_structured_output_unsupported(
+                    self._structured_output_cache_key(model_name)
+                )
             except (
                 openai.APIConnectionError,
                 openai.APITimeoutError,
@@ -424,10 +525,15 @@ class OpenAIAggregationBackend:
 
         raise RuntimeError("OpenAI retry loop exhausted without returning or raising")
 
-    def _fallback_completion(self, messages: list[ChatCompletionMessageParam]) -> str:
+    def _fallback_completion(
+        self,
+        messages: list[ChatCompletionMessageParam],
+        *,
+        model_name: str,
+    ) -> str:
         try:
             response = self.client.chat.completions.create(
-                model=self.provider_model,
+                model=model_name,
                 messages=messages,
             )
             return _message_content(response)
@@ -442,13 +548,19 @@ class OpenAIAggregationBackend:
         except openai.OpenAIError as exc:
             raise _build_upstream_error(exc) from exc
 
-    def _provider_info(self) -> ProviderInfo:
-        return ProviderInfo(name=self.provider_name, model=self.provider_model)
-
-    def _structured_output_supported(self) -> bool:
-        return not _structured_output_unsupported_cached(
-            self._structured_output_cache_key
+    def _provider_info(self, model_name: str | None = None) -> ProviderInfo:
+        return ProviderInfo(
+            name=self.provider_name,
+            model=model_name or self.provider_model,
         )
+
+    def _structured_output_supported(self, model_name: str) -> bool:
+        return not _structured_output_unsupported_cached(
+            self._structured_output_cache_key(model_name)
+        )
+
+    def _structured_output_cache_key(self, model_name: str) -> tuple[str, str]:
+        return (str(self.settings.resolved_openai_base_url), model_name)
 
 
 def _message_content(response: Any) -> str:
@@ -703,6 +815,24 @@ def _append_warning_codes(
         existing.add(code)
 
 
+def _append_tool_call_metadata(
+    diagnostics: ToolDiagnostics | SearchDiagnostics,
+    outcome: ToolCallOutcome,
+) -> None:
+    _append_warning_codes(diagnostics, outcome.warning_codes)
+    _set_tool_call_metadata(diagnostics, outcome)
+
+
+def _set_tool_call_metadata(
+    diagnostics: ToolDiagnostics | SearchDiagnostics,
+    outcome: ToolCallOutcome,
+) -> None:
+    diagnostics.provider = outcome.provider
+    diagnostics.attempted_models = list(outcome.attempted_models)
+    diagnostics.fallback_count = outcome.fallback_count
+    diagnostics.fallback_trigger = outcome.fallback_trigger
+
+
 def _tool_diagnostics(
     *,
     provider: ProviderInfo,
@@ -732,6 +862,41 @@ def _dedupe_warning_codes(codes: list[str]) -> list[str]:
             seen.add(code)
             merged.append(code)
     return merged
+
+
+def _augment_warning_codes_for_fallback(
+    *,
+    warning_codes: list[str],
+    fallback_count: int,
+) -> list[str]:
+    merged = list(warning_codes)
+    if fallback_count > 0:
+        merged.append(_MODEL_FALLBACK_WARNING_CODE)
+    return _dedupe_warning_codes(merged)
+
+
+def _fallback_trigger_for_error(exc: UpstreamSearchError) -> str | None:
+    if exc.error_code == _EMPTY_UPSTREAM_RESPONSE_ERROR_CODE:
+        return _EMPTY_UPSTREAM_RESPONSE_ERROR_CODE
+    return _FALLBACK_TRIGGER_BY_ERROR_TYPE.get(exc.log_context.error_type)
+
+
+def _with_attempted_models(
+    exc: UpstreamSearchError,
+    *,
+    attempted_models: list[str],
+    fallback_trigger: str | None,
+) -> UpstreamSearchError:
+    return UpstreamSearchError(
+        exc.client_message,
+        retryable=exc.retryable,
+        log_context=exc.log_context,
+        error_code=exc.error_code,
+        allow_fallback=exc.allow_fallback,
+        attempted_models=list(attempted_models),
+        final_model=attempted_models[-1] if attempted_models else None,
+        fallback_trigger=fallback_trigger,
+    )
 
 
 def _domain_from_url(url: str) -> str:

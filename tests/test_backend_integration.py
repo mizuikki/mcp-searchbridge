@@ -273,6 +273,88 @@ class _GenericBadRequestHandler(BaseHTTPRequestHandler):
         return
 
 
+class _ModelFallbackHandler(BaseHTTPRequestHandler):
+    attempted_models: list[str] = []
+
+    def do_POST(self) -> None:  # noqa: N802
+        if self.path != "/v1/chat/completions":
+            self.send_response(404)
+            self.end_headers()
+            return
+
+        length = int(self.headers["Content-Length"])
+        payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        model = str(payload["model"])
+        type(self).attempted_models.append(model)
+
+        if model == "primary-model":
+            self.send_response(429)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(
+                json.dumps(
+                    {
+                        "error": {
+                            "message": "rate limited",
+                            "type": "rate_limit_error",
+                        }
+                    }
+                ).encode("utf-8")
+            )
+            return
+
+        response = {
+            "id": "chatcmpl-model-fallback",
+            "object": "chat.completion",
+            "created": 1,
+            "model": model,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": json.dumps(
+                            {
+                                "summary": {
+                                    "text": "Recovered via fallback model",
+                                    "citations": [
+                                        {
+                                            "source_id": "source_1",
+                                            "chunk_id": "source_1_chunk_1",
+                                        }
+                                    ],
+                                },
+                                "sources": [
+                                    {
+                                        "source_id": "source_1",
+                                        "title": "Fallback Source",
+                                        "url": "https://example.com/fallback-model",
+                                        "published_at": "2026-06-18",
+                                        "evidence": [
+                                            {
+                                                "chunk_id": "source_1_chunk_1",
+                                                "text": "Recovered by fallback model",
+                                            }
+                                        ],
+                                    }
+                                ],
+                                "warnings": [],
+                            }
+                        ),
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+        }
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(response).encode("utf-8"))
+
+    def log_message(self, format: str, *args: object) -> None:  # noqa: A003
+        return
+
+
 class _RetryingEmptyContentHandler(BaseHTTPRequestHandler):
     request_count = 0
     empty_attempts_before_success = 1
@@ -504,6 +586,42 @@ def test_backend_does_not_fallback_for_unrelated_bad_request() -> None:
         assert "127.0.0.1" not in exc.client_message
 
         assert _GenericBadRequestHandler.request_count == 1
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_backend_falls_back_to_next_model_on_retryable_error() -> None:
+    _ModelFallbackHandler.attempted_models = []
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _ModelFallbackHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        host, port = host_port(server.server_address)
+        settings = make_settings(
+            OPENAI_BASE_URL=f"http://{host}:{port}/v1",
+            OPENAI_MODEL="primary-model,fallback-model",
+            OPENAI_MAX_RETRIES=0,
+        )
+        backend = OpenAIAggregationBackend(settings)
+
+        result = backend.search_web(SearchRequest(query="fallback model test"))
+
+        assert result.summary.text == "Recovered via fallback model"
+        assert result.diagnostics.provider.model == "fallback-model"
+        assert result.diagnostics.attempted_models == [
+            "primary-model",
+            "fallback-model",
+        ]
+        assert result.diagnostics.fallback_count == 1
+        assert result.diagnostics.fallback_trigger == "rate_limited"
+        warning_codes = [warning.code for warning in result.diagnostics.warnings]
+        assert "model_fallback_used" in warning_codes
+        assert _ModelFallbackHandler.attempted_models == [
+            "primary-model",
+            "fallback-model",
+        ]
     finally:
         server.shutdown()
         server.server_close()

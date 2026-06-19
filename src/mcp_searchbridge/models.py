@@ -182,6 +182,9 @@ class ToolDiagnostics(BaseModel):
     selected_chunk_ids: list[str] = Field(default_factory=list)
     discovery_used: bool | None = None
     retrieval_method: str | None = None
+    attempted_models: list[str] = Field(default_factory=list)
+    fallback_count: int | None = None
+    fallback_trigger: str | None = None
     warnings: list[WarningInfo] = Field(default_factory=list)
     error: ErrorInfo | None = None
 

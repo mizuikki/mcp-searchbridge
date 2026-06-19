@@ -147,11 +147,13 @@ def create_server(
                 domain_allowlist=domain_allowlist or [],
                 return_mode=return_mode,
                 provider=aggregation_backend.provider_name,
-                model=_backend_model(aggregation_backend, active_settings),
+                model=_error_model(exc, aggregation_backend, active_settings),
                 backend_kind=_backend_kind(aggregation_backend),
                 code=exc.error_code or "upstream_request_failed",
                 message=exc.client_message,
                 retryable=exc.retryable,
+                attempted_models=_error_attempted_models(exc),
+                fallback_trigger=exc.fallback_trigger,
             )
         except SearchBridgeError as exc:
             LOGGER.error("search_web failed: %s", exc)
@@ -209,11 +211,13 @@ def create_server(
                 mode=mode,
                 max_chars=max_chars,
                 provider=aggregation_backend.provider_name,
-                model=_backend_model(aggregation_backend, active_settings),
+                model=_error_model(exc, aggregation_backend, active_settings),
                 backend_kind=_backend_kind(aggregation_backend),
                 code=exc.error_code or "upstream_request_failed",
                 message=exc.client_message,
                 retryable=exc.retryable,
+                attempted_models=_error_attempted_models(exc),
+                fallback_trigger=exc.fallback_trigger,
             )
 
     @mcp.tool(
@@ -245,11 +249,13 @@ def create_server(
                 url=url,
                 depth=depth,
                 provider=aggregation_backend.provider_name,
-                model=_backend_model(aggregation_backend, active_settings),
+                model=_error_model(exc, aggregation_backend, active_settings),
                 backend_kind=_backend_kind(aggregation_backend),
                 code=exc.error_code or "upstream_request_failed",
                 message=exc.client_message,
                 retryable=exc.retryable,
+                attempted_models=_error_attempted_models(exc),
+                fallback_trigger=exc.fallback_trigger,
             )
 
     @mcp.tool(
@@ -292,11 +298,13 @@ def create_server(
                 domain_allowlist=domain_allowlist or [],
                 answer_mode=answer_mode,
                 provider=aggregation_backend.provider_name,
-                model=_backend_model(aggregation_backend, active_settings),
+                model=_error_model(exc, aggregation_backend, active_settings),
                 backend_kind=_backend_kind(aggregation_backend),
                 code=exc.error_code or "upstream_request_failed",
                 message=exc.client_message,
                 retryable=exc.retryable,
+                attempted_models=_error_attempted_models(exc),
+                fallback_trigger=exc.fallback_trigger,
             )
 
     @mcp.tool(
@@ -325,11 +333,13 @@ def create_server(
                 query=query,
                 max_results=max_results,
                 provider=aggregation_backend.provider_name,
-                model=_backend_model(aggregation_backend, active_settings),
+                model=_error_model(exc, aggregation_backend, active_settings),
                 backend_kind=_backend_kind(aggregation_backend),
                 code=exc.error_code or "upstream_request_failed",
                 message=exc.client_message,
                 retryable=exc.retryable,
+                attempted_models=_error_attempted_models(exc),
+                fallback_trigger=exc.fallback_trigger,
             )
 
     @mcp.tool(
@@ -359,11 +369,13 @@ def create_server(
             return _resolve_source_error_result(
                 query_or_url=query_or_url,
                 provider=aggregation_backend.provider_name,
-                model=_backend_model(aggregation_backend, active_settings),
+                model=_error_model(exc, aggregation_backend, active_settings),
                 backend_kind=_backend_kind(aggregation_backend),
                 code=exc.error_code or "upstream_request_failed",
                 message=exc.client_message,
                 retryable=exc.retryable,
+                attempted_models=_error_attempted_models(exc),
+                fallback_trigger=exc.fallback_trigger,
             )
 
     return mcp
@@ -428,6 +440,8 @@ def _search_error_result(
     code: str,
     message: str,
     retryable: bool,
+    attempted_models: list[str] | None = None,
+    fallback_trigger: str | None = None,
 ) -> SearchResult:
     from .models import QueryEcho, Summary
 
@@ -456,6 +470,9 @@ def _search_error_result(
                 sources_with_evidence=0,
                 evidence_chunks_returned=0,
             ),
+            attempted_models=list(attempted_models or []),
+            fallback_count=_fallback_count(attempted_models),
+            fallback_trigger=fallback_trigger,
             warnings=[],
             error=ErrorInfo(code=code, message=message, retryable=retryable),
         ),
@@ -473,6 +490,8 @@ def _extract_error_result(
     code: str,
     message: str,
     retryable: bool,
+    attempted_models: list[str] | None = None,
+    fallback_trigger: str | None = None,
 ) -> ExtractResult:
     return ExtractResult(
         request=ExtractRequestEcho(
@@ -490,6 +509,9 @@ def _extract_error_result(
             status="error",
             provider=_provider_info(provider, model),
             backend_kind=backend_kind,
+            attempted_models=list(attempted_models or []),
+            fallback_count=_fallback_count(attempted_models),
+            fallback_trigger=fallback_trigger,
             warnings=[],
             error=ErrorInfo(code=code, message=message, retryable=retryable),
         ),
@@ -506,6 +528,8 @@ def _outline_error_result(
     code: str,
     message: str,
     retryable: bool,
+    attempted_models: list[str] | None = None,
+    fallback_trigger: str | None = None,
 ) -> OutlineResult:
     return OutlineResult(
         request=OutlineRequestEcho(url=parse_http_url(url), depth=depth),
@@ -515,6 +539,9 @@ def _outline_error_result(
             status="error",
             provider=_provider_info(provider, model),
             backend_kind=backend_kind,
+            attempted_models=list(attempted_models or []),
+            fallback_count=_fallback_count(attempted_models),
+            fallback_trigger=fallback_trigger,
             warnings=[],
             error=ErrorInfo(code=code, message=message, retryable=retryable),
         ),
@@ -533,6 +560,8 @@ def _docs_qa_error_result(
     code: str,
     message: str,
     retryable: bool,
+    attempted_models: list[str] | None = None,
+    fallback_trigger: str | None = None,
 ) -> DocsQAResult:
     return DocsQAResult(
         request=DocsQARequestEcho(
@@ -548,6 +577,9 @@ def _docs_qa_error_result(
             status="error",
             provider=_provider_info(provider, model),
             backend_kind=backend_kind,
+            attempted_models=list(attempted_models or []),
+            fallback_count=_fallback_count(attempted_models),
+            fallback_trigger=fallback_trigger,
             warnings=[],
             error=ErrorInfo(code=code, message=message, retryable=retryable),
         ),
@@ -564,6 +596,8 @@ def _official_docs_error_result(
     code: str,
     message: str,
     retryable: bool,
+    attempted_models: list[str] | None = None,
+    fallback_trigger: str | None = None,
 ) -> OfficialDocsResult:
     return OfficialDocsResult(
         request=OfficialDocsRequestEcho(query=query, max_results=max_results),
@@ -572,6 +606,9 @@ def _official_docs_error_result(
             status="error",
             provider=_provider_info(provider, model),
             backend_kind=backend_kind,
+            attempted_models=list(attempted_models or []),
+            fallback_count=_fallback_count(attempted_models),
+            fallback_trigger=fallback_trigger,
             warnings=[],
             error=ErrorInfo(code=code, message=message, retryable=retryable),
         ),
@@ -587,6 +624,8 @@ def _resolve_source_error_result(
     code: str,
     message: str,
     retryable: bool,
+    attempted_models: list[str] | None = None,
+    fallback_trigger: str | None = None,
 ) -> DocSourceResolutionResult:
     return DocSourceResolutionResult(
         request=DocSourceResolutionRequestEcho(query_or_url=query_or_url),
@@ -598,10 +637,33 @@ def _resolve_source_error_result(
             status="error",
             provider=_provider_info(provider, model),
             backend_kind=backend_kind,
+            attempted_models=list(attempted_models or []),
+            fallback_count=_fallback_count(attempted_models),
+            fallback_trigger=fallback_trigger,
             warnings=[],
             error=ErrorInfo(code=code, message=message, retryable=retryable),
         ),
     )
+
+
+def _error_model(
+    exc: UpstreamSearchError,
+    backend: AggregationBackend,
+    settings: Settings,
+) -> str:
+    if exc.final_model:
+        return exc.final_model
+    return _backend_model(backend, settings)
+
+
+def _error_attempted_models(exc: UpstreamSearchError) -> list[str]:
+    return list(exc.attempted_models)
+
+
+def _fallback_count(attempted_models: list[str] | None) -> int | None:
+    if attempted_models is None:
+        return None
+    return max(len(attempted_models) - 1, 0)
 
 
 if __name__ == "__main__":

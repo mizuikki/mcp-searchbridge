@@ -15,9 +15,36 @@ def test_settings_parse_required_and_optional_values() -> None:
     )
 
     assert settings.openai_model == "search-model"
+    assert settings.resolved_openai_models == ["search-model"]
     assert settings.openai_timeout_seconds == 30
     assert settings.searchbridge_default_max_sources == 7
     assert settings.searchbridge_log_level == "DEBUG"
+
+
+def test_settings_parse_openai_model_chain() -> None:
+    settings = make_settings(OPENAI_MODEL=" primary , fallback-a, fallback-b ")
+
+    assert settings.openai_model == "primary,fallback-a,fallback-b"
+    assert settings.resolved_openai_model == "primary"
+    assert settings.resolved_openai_models == [
+        "primary",
+        "fallback-a",
+        "fallback-b",
+    ]
+
+
+def test_settings_ignore_empty_segments_in_openai_model_chain() -> None:
+    settings = make_settings(OPENAI_MODEL="primary,,fallback-a,")
+
+    assert settings.resolved_openai_models == ["primary", "fallback-a"]
+
+
+def test_settings_reject_duplicate_models_in_openai_model_chain() -> None:
+    with pytest.raises(
+        ValidationError,
+        match="OPENAI_MODEL must not contain duplicate model names",
+    ):
+        make_settings(OPENAI_MODEL="primary,fallback-a,primary")
 
 
 def test_settings_require_mandatory_env_values() -> None:

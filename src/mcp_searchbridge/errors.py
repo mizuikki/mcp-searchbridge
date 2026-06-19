@@ -29,6 +29,9 @@ class UpstreamSearchError(SearchBridgeError):
         log_context: UpstreamLogContext,
         error_code: str | None = None,
         allow_fallback: bool = False,
+        attempted_models: list[str] | None = None,
+        final_model: str | None = None,
+        fallback_trigger: str | None = None,
     ) -> None:
         super().__init__(client_message)
         self.client_message = client_message
@@ -36,6 +39,9 @@ class UpstreamSearchError(SearchBridgeError):
         self.log_context = log_context
         self.error_code = error_code
         self.allow_fallback = allow_fallback
+        self.attempted_models = attempted_models or []
+        self.final_model = final_model
+        self.fallback_trigger = fallback_trigger
 
     def __str__(self) -> str:
         return self.client_message

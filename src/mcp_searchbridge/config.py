@@ -104,6 +104,28 @@ class Settings(BaseSettings):
         text = str(value).strip()
         return text or None
 
+    @field_validator("openai_model")
+    @classmethod
+    def validate_openai_model_chain(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+
+        models: list[str] = []
+        seen: set[str] = set()
+        for raw_item in value.split(","):
+            model = raw_item.strip()
+            if not model:
+                continue
+            if model in seen:
+                raise ValueError("OPENAI_MODEL must not contain duplicate model names")
+            seen.add(model)
+            models.append(model)
+
+        if not models:
+            raise ValueError("OPENAI_MODEL must include at least one model name")
+
+        return ",".join(models)
+
     @field_validator("searchbridge_backend_kind", mode="before")
     @classmethod
     def normalize_backend_kind(cls, value: object) -> str:
@@ -179,9 +201,16 @@ class Settings(BaseSettings):
 
     @property
     def resolved_openai_model(self) -> str:
+        models = self.resolved_openai_models
+        if not models:
+            raise RuntimeError("OPENAI_MODEL is not configured")
+        return models[0]
+
+    @property
+    def resolved_openai_models(self) -> list[str]:
         if self.openai_model is None:
             raise RuntimeError("OPENAI_MODEL is not configured")
-        return self.openai_model
+        return [model for model in self.openai_model.split(",") if model]
 
 
 @lru_cache(maxsize=1)

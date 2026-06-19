@@ -417,3 +417,39 @@ def test_server_preserves_structured_upstream_error_code() -> None:
         assert result.diagnostics.error.retryable is False
 
     asyncio.run(run_call())
+
+
+def test_server_includes_fallback_attempt_metadata_in_error_results() -> None:
+    settings = make_settings(OPENAI_MODEL="fake-model,fallback-model")
+    exc = UpstreamSearchError(
+        "The upstream provider rate-limited the request.",
+        retryable=True,
+        log_context=UpstreamLogContext(
+            error_type="RateLimitError",
+            status_code=429,
+            request_id="req_rate_limit",
+        ),
+        attempted_models=["fake-model", "fallback-model"],
+        final_model="fallback-model",
+        fallback_trigger="rate_limited",
+    )
+    backend = FailingBackend(exc)
+    server = create_server(settings=settings, backend=backend)
+
+    async def run_call() -> None:
+        result = await server._tool_manager.call_tool(
+            "search_web",
+            {
+                "query": "latest status",
+            },
+        )
+
+        assert result.diagnostics.provider.model == "fallback-model"
+        assert result.diagnostics.attempted_models == [
+            "fake-model",
+            "fallback-model",
+        ]
+        assert result.diagnostics.fallback_count == 1
+        assert result.diagnostics.fallback_trigger == "rate_limited"
+
+    asyncio.run(run_call())
