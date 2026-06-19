@@ -10,7 +10,11 @@ import openai
 import pytest
 
 from mcp_searchbridge.errors import UpstreamSearchError
-from mcp_searchbridge.models import ExtractUrlRequest, SearchRequest
+from mcp_searchbridge.models import (
+    ExtractUrlRequest,
+    FindOfficialDocsRequest,
+    SearchRequest,
+)
 from mcp_searchbridge.openai_backend import ChatNamespace, OpenAIAggregationBackend
 from tests.helpers import host_port, make_settings, url
 
@@ -336,6 +340,22 @@ class _RetryingEmptyContentHandler(BaseHTTPRequestHandler):
         return
 
 
+class _FencedJsonStringClient:
+    def __init__(self, content: str) -> None:
+        class _ChatCompletions:
+            def __init__(self, value: str) -> None:
+                self._value = value
+
+            def create(self, **_: object) -> object:
+                return self._value
+
+        class _ChatNamespaceImpl:
+            def __init__(self, value: str) -> None:
+                self.completions = _ChatCompletions(value)
+
+        self.chat = cast(ChatNamespace, _ChatNamespaceImpl(content))
+
+
 def test_backend_search_against_fake_openai_endpoint() -> None:
     server = ThreadingHTTPServer(("127.0.0.1", 0), _ChatCompletionsHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -580,6 +600,43 @@ def test_backend_retries_empty_message_content_until_exhausted() -> None:
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_find_official_docs_parses_fenced_json_from_sse_string_response() -> None:
+    response = (
+        'data: {"id":"chatcmpl-test","object":"chat.completion.chunk","created":1,'
+        '"model":"fake-search-model","choices":[{"index":0,"delta":{"role":'
+        '"assistant","content":"**JSON output:**\\n\\n```json\\n{\\n  \\"matches\\": '
+        '[\\n    {\\n      \\"title\\": \\"Relations & rollups - Notion Help Center\\",'
+        '\\n      \\"url\\": \\"https://www.notion.com/help/relations-and-rollups\\",'
+        '\\n      \\"rationale\\": \\"Canonical official Notion Help Center page\\"'
+        '\\n    }\\n  ],\\n  \\"warnings\\": []\\n}\\n```\\n\\nThese are '
+        'canonical."}}]}\n\n'
+        "data: [DONE]\n\n"
+    )
+    settings = make_settings(
+        OPENAI_BASE_URL="http://127.0.0.1:9999/v1",
+        OPENAI_MODEL="fake-search-model",
+    )
+    backend = OpenAIAggregationBackend(
+        settings,
+        client=_FencedJsonStringClient(response),
+    )
+
+    result = backend.find_official_docs(
+        FindOfficialDocsRequest(
+            query="Notion official docs databases relations rollups linked views",
+            max_results=5,
+        )
+    )
+
+    assert len(result.matches) == 1
+    assert result.matches[0].title == "Relations & rollups - Notion Help Center"
+    assert (
+        str(result.matches[0].url)
+        == "https://www.notion.com/help/relations-and-rollups"
+    )
+    assert result.diagnostics.status == "ok"
 
 
 def test_backend_marks_404_like_pages_as_empty_or_partial() -> None:

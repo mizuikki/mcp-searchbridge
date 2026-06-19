@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 from typing import Any, Protocol, cast
 from urllib.parse import urlparse
@@ -78,6 +79,10 @@ _RETRYABLE_EMPTY_RESPONSE_ERROR_TYPES = {
     "EmptyStringResponse",
     "EmptyMessageContent",
 }
+_JSON_CODE_BLOCK_PATTERN = re.compile(
+    r"```(?:json)?\s*(.*?)```",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 class ChatCompletionsClient(Protocol):
@@ -551,11 +556,36 @@ def _extract_json_payload(content: str) -> dict[str, object] | None:
     text = content.strip()
     if not text:
         return None
-    try:
-        payload = json.loads(text)
-    except json.JSONDecodeError:
-        return None
-    return payload if isinstance(payload, dict) else None
+    for candidate in _iter_json_candidates(text):
+        try:
+            payload = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return None
+
+
+def _iter_json_candidates(text: str) -> list[str]:
+    candidates: list[str] = [text]
+
+    for match in _JSON_CODE_BLOCK_PATTERN.finditer(text):
+        candidate = match.group(1).strip()
+        if candidate:
+            candidates.append(candidate)
+
+    decoder = json.JSONDecoder()
+    start = text.find("{")
+    while start != -1:
+        try:
+            _, end = decoder.raw_decode(text[start:])
+        except json.JSONDecodeError:
+            start = text.find("{", start + 1)
+            continue
+        candidates.append(text[start : start + end].strip())
+        start = text.find("{", start + 1)
+
+    return candidates
 
 
 def _parse_sources_from_payload(
