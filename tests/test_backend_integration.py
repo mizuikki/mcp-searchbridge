@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import cast
@@ -637,6 +638,39 @@ def test_find_official_docs_parses_fenced_json_from_sse_string_response() -> Non
         == "https://www.notion.com/help/relations-and-rollups"
     )
     assert result.diagnostics.status == "ok"
+
+
+def test_find_official_docs_logs_non_stream_request_receiving_sse(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    response = (
+        'data: {"id":"chatcmpl-test","object":"chat.completion.chunk","created":1,'
+        '"model":"fake-search-model","choices":[{"index":0,"delta":{"role":'
+        '"assistant","content":"```json\\n{\\n  \\"matches\\": [\\n    {\\n      '
+        '\\"title\\": \\"Official Docs\\",\\n      \\"url\\": '
+        '\\"https://example.com/docs\\",\\n      \\"rationale\\": \\"Canonical\\"'
+        '\\n    }\\n  ],\\n  \\"warnings\\": []\\n}\\n```"}}]}\n\n'
+        "data: [DONE]\n\n"
+    )
+    settings = make_settings(
+        OPENAI_BASE_URL="http://127.0.0.1:9999/v1",
+        OPENAI_MODEL="fake-search-model",
+    )
+    backend = OpenAIAggregationBackend(
+        settings,
+        client=_FencedJsonStringClient(response),
+    )
+    caplog.set_level(logging.WARNING)
+
+    result = backend.find_official_docs(
+        FindOfficialDocsRequest(query="official docs", max_results=1)
+    )
+
+    assert len(result.matches) == 1
+    assert (
+        "text/event-stream content for a non-stream chat.completions request"
+        in caplog.text
+    )
 
 
 def test_backend_marks_404_like_pages_as_empty_or_partial() -> None:

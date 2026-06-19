@@ -445,6 +445,11 @@ class OpenAIAggregationBackend:
 
 def _message_content(response: Any) -> str:
     if isinstance(response, str):
+        if response.lstrip().startswith("data:"):
+            LOGGER.warning(
+                "Upstream provider returned text/event-stream content for a "
+                "non-stream chat.completions request."
+            )
         content = _content_from_string_response(response)
         if content:
             return content
