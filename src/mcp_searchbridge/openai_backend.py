@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import re
 import threading
+import time
 from typing import Any, Protocol, cast
 from urllib.parse import urlparse
 
@@ -79,6 +81,8 @@ _RETRYABLE_EMPTY_RESPONSE_ERROR_TYPES = {
     "EmptyStringResponse",
     "EmptyMessageContent",
 }
+_EMPTY_RESPONSE_INITIAL_RETRY_DELAY = 0.5
+_EMPTY_RESPONSE_MAX_RETRY_DELAY = 2.0
 _JSON_CODE_BLOCK_PATTERN = re.compile(
     r"```(?:json)?\s*(.*?)```",
     re.IGNORECASE | re.DOTALL,
@@ -385,12 +389,16 @@ class OpenAIAggregationBackend:
                 attempts_remaining -= 1
                 if attempts_remaining == 0:
                     raise
+                retries_taken = self.settings.openai_max_retries - attempts_remaining
+                delay_seconds = _calculate_empty_response_retry_delay(retries_taken)
                 LOGGER.warning(
                     "Upstream provider returned empty response content; retrying "
-                    "[error_type=%s remaining_attempts=%s]",
+                    "[error_type=%s remaining_attempts=%s delay_seconds=%.6f]",
                     exc.log_context.error_type,
                     attempts_remaining,
+                    delay_seconds,
                 )
+                time.sleep(delay_seconds)
             except openai.BadRequestError as exc:
                 if not _is_structured_output_unsupported_error(exc):
                     raise _build_upstream_error(exc) from exc
@@ -486,6 +494,16 @@ def _is_retryable_empty_response_error(exc: UpstreamSearchError) -> bool:
         and exc.error_code == _EMPTY_UPSTREAM_RESPONSE_ERROR_CODE
         and exc.log_context.error_type in _RETRYABLE_EMPTY_RESPONSE_ERROR_TYPES
     )
+
+
+def _calculate_empty_response_retry_delay(retries_taken: int) -> float:
+    base_delay = min(
+        _EMPTY_RESPONSE_INITIAL_RETRY_DELAY * pow(2.0, retries_taken),
+        _EMPTY_RESPONSE_MAX_RETRY_DELAY,
+    )
+    jitter = 1 - 0.25 * random.random()
+    delay = base_delay * jitter
+    return delay if delay >= 0 else 0
 
 
 def _structured_output_unsupported_cached(cache_key: tuple[str, str]) -> bool:

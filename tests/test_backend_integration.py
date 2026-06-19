@@ -10,6 +10,7 @@ import httpx
 import openai
 import pytest
 
+import mcp_searchbridge.openai_backend as openai_backend_module
 from mcp_searchbridge.errors import UpstreamSearchError
 from mcp_searchbridge.models import (
     ExtractUrlRequest,
@@ -545,13 +546,17 @@ def test_backend_connection_errors_are_sanitized() -> None:
     assert "http://" not in exc.client_message
 
 
-def test_backend_retries_empty_string_responses() -> None:
+def test_backend_retries_empty_string_responses(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _RetryingEmptyContentHandler.request_count = 0
     _RetryingEmptyContentHandler.empty_attempts_before_success = 1
     _RetryingEmptyContentHandler.empty_mode = "string"
     server = ThreadingHTTPServer(("127.0.0.1", 0), _RetryingEmptyContentHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
+    sleep_calls: list[float] = []
 
     try:
         host, port = host_port(server.server_address)
@@ -561,24 +566,40 @@ def test_backend_retries_empty_string_responses() -> None:
             OPENAI_MAX_RETRIES=1,
         )
         backend = OpenAIAggregationBackend(settings)
+        monkeypatch.setattr(
+            openai_backend_module.random,
+            "random",
+            lambda: 0.0,
+        )
+        monkeypatch.setattr(
+            openai_backend_module.time,
+            "sleep",
+            lambda seconds: sleep_calls.append(seconds),
+        )
+        caplog.set_level(logging.WARNING)
 
         result = backend.search_web(SearchRequest(query="retry empty string"))
 
         assert result.summary.text == "Recovered after retry"
         assert str(result.sources[0].url) == "https://example.com/recovered"
         assert _RetryingEmptyContentHandler.request_count == 2
+        assert sleep_calls == [pytest.approx(0.5)]
+        assert "delay_seconds=0.500000" in caplog.text
     finally:
         server.shutdown()
         server.server_close()
 
 
-def test_backend_retries_empty_message_content_until_exhausted() -> None:
+def test_backend_retries_empty_message_content_until_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _RetryingEmptyContentHandler.request_count = 0
     _RetryingEmptyContentHandler.empty_attempts_before_success = 3
     _RetryingEmptyContentHandler.empty_mode = "message"
     server = ThreadingHTTPServer(("127.0.0.1", 0), _RetryingEmptyContentHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
+    sleep_calls: list[float] = []
 
     try:
         host, port = host_port(server.server_address)
@@ -588,6 +609,16 @@ def test_backend_retries_empty_message_content_until_exhausted() -> None:
             OPENAI_MAX_RETRIES=1,
         )
         backend = OpenAIAggregationBackend(settings)
+        monkeypatch.setattr(
+            openai_backend_module.random,
+            "random",
+            lambda: 0.0,
+        )
+        monkeypatch.setattr(
+            openai_backend_module.time,
+            "sleep",
+            lambda seconds: sleep_calls.append(seconds),
+        )
 
         with pytest.raises(UpstreamSearchError) as exc_info:
             backend.search_web(SearchRequest(query="retry empty message"))
@@ -598,6 +629,47 @@ def test_backend_retries_empty_message_content_until_exhausted() -> None:
         assert exc.error_code == "empty_upstream_response"
         assert exc.log_context.error_type == "EmptyMessageContent"
         assert _RetryingEmptyContentHandler.request_count == 2
+        assert sleep_calls == [pytest.approx(0.5)]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_backend_uses_exponential_backoff_for_multiple_empty_response_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _RetryingEmptyContentHandler.request_count = 0
+    _RetryingEmptyContentHandler.empty_attempts_before_success = 2
+    _RetryingEmptyContentHandler.empty_mode = "string"
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _RetryingEmptyContentHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    sleep_calls: list[float] = []
+
+    try:
+        host, port = host_port(server.server_address)
+        settings = make_settings(
+            OPENAI_BASE_URL=f"http://{host}:{port}/v1",
+            OPENAI_MODEL="fake-search-model",
+            OPENAI_MAX_RETRIES=2,
+        )
+        backend = OpenAIAggregationBackend(settings)
+        monkeypatch.setattr(
+            openai_backend_module.random,
+            "random",
+            lambda: 0.0,
+        )
+        monkeypatch.setattr(
+            openai_backend_module.time,
+            "sleep",
+            lambda seconds: sleep_calls.append(seconds),
+        )
+
+        result = backend.search_web(SearchRequest(query="retry twice before success"))
+
+        assert result.summary.text == "Recovered after retry"
+        assert _RetryingEmptyContentHandler.request_count == 3
+        assert sleep_calls == [pytest.approx(0.5), pytest.approx(1.0)]
     finally:
         server.shutdown()
         server.server_close()
