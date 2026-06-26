@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import inspect
 import json
 import logging
 import random
 import re
+import secrets
 import threading
 from collections.abc import Awaitable
 from dataclasses import dataclass
@@ -30,6 +32,14 @@ from .config import Settings
 from .errors import UpstreamLogContext, UpstreamSearchError
 from .models import (
     Citation,
+    ConversationContinueRequest,
+    ConversationContinueResult,
+    ConversationGetRequest,
+    ConversationGetResult,
+    ConversationMessage,
+    ConversationRequestEcho,
+    ConversationStartRequest,
+    ConversationStartResult,
     DocSourceResolutionRequest,
     DocSourceResolutionRequestEcho,
     DocSourceResolutionResult,
@@ -130,6 +140,70 @@ class ToolCallOutcome:
     fallback_trigger: str | None
 
 
+@dataclass(slots=True)
+class ConversationState:
+    conversation_id: str
+    messages: list[ConversationMessage]
+    created_at: str
+    last_accessed_at: str
+
+
+class ConversationManager:
+    """Process-local conversation state storage."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._conversations: dict[str, ConversationState] = {}
+
+    def create(self) -> ConversationState:
+        timestamp = _timestamp_now()
+        state = ConversationState(
+            conversation_id=_new_conversation_id(),
+            messages=[],
+            created_at=timestamp,
+            last_accessed_at=timestamp,
+        )
+        with self._lock:
+            self._conversations[state.conversation_id] = state
+        return self._clone_state(state)
+
+    def get(self, conversation_id: str) -> ConversationState | None:
+        with self._lock:
+            state = self._conversations.get(conversation_id)
+            if state is None:
+                return None
+            state.last_accessed_at = _timestamp_now()
+            return self._clone_state(state)
+
+    def append(
+        self,
+        conversation_id: str,
+        *,
+        user_message: str,
+        assistant_message: str,
+    ) -> ConversationState | None:
+        with self._lock:
+            state = self._conversations.get(conversation_id)
+            if state is None:
+                return None
+            state.messages.append(
+                ConversationMessage(role="user", content=user_message)
+            )
+            state.messages.append(
+                ConversationMessage(role="assistant", content=assistant_message)
+            )
+            state.last_accessed_at = _timestamp_now()
+            return self._clone_state(state)
+
+    def _clone_state(self, state: ConversationState) -> ConversationState:
+        return ConversationState(
+            conversation_id=state.conversation_id,
+            messages=[message.model_copy() for message in state.messages],
+            created_at=state.created_at,
+            last_accessed_at=state.last_accessed_at,
+        )
+
+
 class OpenAIAggregationBackend:
     """Bridge multiple MCP retrieval tools into an OpenAI-compatible provider."""
 
@@ -140,6 +214,7 @@ class OpenAIAggregationBackend:
         self.settings = settings
         self.provider_model = settings.resolved_openai_model
         self.provider_models = settings.resolved_openai_models
+        self.conversation_manager = ConversationManager()
         self.client = client or AsyncOpenAI(
             api_key=settings.resolved_openai_api_key,
             base_url=str(settings.resolved_openai_base_url),
@@ -383,13 +458,154 @@ class OpenAIAggregationBackend:
         _set_tool_call_metadata(result.diagnostics, outcome)
         return result
 
+    async def conversation_start(
+        self,
+        request: ConversationStartRequest,
+    ) -> ConversationStartResult:
+        """Start a new upstream-backed conversation."""
+
+        state = self.conversation_manager.create()
+        outcome = await self._call_chat_messages(
+            messages=[
+                ChatCompletionUserMessageParam(role="user", content=request.message),
+            ]
+        )
+        updated_state = self.conversation_manager.append(
+            state.conversation_id,
+            user_message=request.message,
+            assistant_message=outcome.content,
+        )
+        if updated_state is None:
+            raise RuntimeError("Conversation disappeared after creation.")
+        result = ConversationStartResult(
+            conversation_id=updated_state.conversation_id,
+            assistant_message=outcome.content,
+            diagnostics=_tool_diagnostics(
+                provider=outcome.provider,
+                warning_codes=outcome.warning_codes,
+                status="ok",
+                backend_kind=self.backend_kind,
+            ),
+        )
+        _set_tool_call_metadata(result.diagnostics, outcome)
+        return result
+
+    async def conversation_continue(
+        self,
+        request: ConversationContinueRequest,
+    ) -> ConversationContinueResult:
+        """Continue an upstream-backed conversation."""
+
+        state = self.conversation_manager.get(request.conversation_id)
+        if state is None:
+            return _conversation_continue_error_result(
+                conversation_id=request.conversation_id,
+                provider=self.provider_name,
+                model=self.provider_model,
+                backend_kind=self.backend_kind,
+                code="conversation_not_found",
+                message=(
+                    "Conversation not found. Start a new conversation with "
+                    "conversation_start."
+                ),
+                retryable=False,
+            )
+
+        messages = [
+            ConversationMessage(role=item.role, content=item.content)
+            for item in state.messages
+        ]
+        messages.append(ConversationMessage(role="user", content=request.message))
+        outcome = await self._call_chat_messages(
+            messages=[
+                _chat_message_from_conversation_message(message)
+                for message in messages
+            ]
+        )
+        updated_state = self.conversation_manager.append(
+            request.conversation_id,
+            user_message=request.message,
+            assistant_message=outcome.content,
+        )
+        if updated_state is None:
+            return _conversation_continue_error_result(
+                conversation_id=request.conversation_id,
+                provider=self.provider_name,
+                model=self.provider_model,
+                backend_kind=self.backend_kind,
+                code="conversation_not_found",
+                message=(
+                    "Conversation not found. Start a new conversation with "
+                    "conversation_start."
+                ),
+                retryable=False,
+            )
+        result = ConversationContinueResult(
+            request=ConversationRequestEcho(
+                conversation_id=updated_state.conversation_id,
+            ),
+            assistant_message=outcome.content,
+            diagnostics=_tool_diagnostics(
+                provider=outcome.provider,
+                warning_codes=outcome.warning_codes,
+                status="ok",
+                backend_kind=self.backend_kind,
+            ),
+        )
+        _set_tool_call_metadata(result.diagnostics, outcome)
+        return result
+
+    async def conversation_get(
+        self,
+        request: ConversationGetRequest,
+    ) -> ConversationGetResult:
+        """Return current in-memory conversation state."""
+
+        state = self.conversation_manager.get(request.conversation_id)
+        if state is None:
+            return _conversation_get_error_result(
+                conversation_id=request.conversation_id,
+                provider=self.provider_name,
+                model=self.provider_model,
+                backend_kind=self.backend_kind,
+                code="conversation_not_found",
+                message=(
+                    "Conversation not found. Start a new conversation with "
+                    "conversation_start."
+                ),
+                retryable=False,
+            )
+        return ConversationGetResult(
+            request=ConversationRequestEcho(conversation_id=state.conversation_id),
+            messages=state.messages,
+            diagnostics=_tool_diagnostics(
+                provider=self._provider_info(),
+                warning_codes=[],
+                status="ok",
+                backend_kind=self.backend_kind,
+            ),
+        )
+
     async def _call_json_tool(self, user_prompt: str) -> ToolCallOutcome:
-        messages: list[ChatCompletionMessageParam] = [
+        return await self._call_chat_messages(
+            messages=[
+                ChatCompletionUserMessageParam(role="user", content=user_prompt),
+            ],
+            use_response_format=True,
+        )
+
+    async def _call_chat_messages(
+        self,
+        *,
+        messages: list[ChatCompletionMessageParam],
+        use_response_format: bool = True,
+    ) -> ToolCallOutcome:
+        upstream_messages: list[ChatCompletionMessageParam] = [
             ChatCompletionSystemMessageParam(
                 role="system",
                 content=build_system_prompt(self.settings.searchbridge_system_prompt),
             ),
-            ChatCompletionUserMessageParam(role="user", content=user_prompt),
+            *messages,
         ]
 
         attempted_models: list[str] = []
@@ -399,14 +615,24 @@ class OpenAIAggregationBackend:
         for model_name in self.provider_models:
             attempted_models.append(model_name)
             try:
-                (
-                    content,
-                    response_format_accepted,
-                    warning_codes,
-                ) = await self._call_model_json_tool(
-                    messages=messages,
-                    model_name=model_name,
-                )
+                if use_response_format:
+                    (
+                        content,
+                        response_format_accepted,
+                        warning_codes,
+                    ) = await self._call_model_json_tool(
+                        messages=upstream_messages,
+                        model_name=model_name,
+                    )
+                else:
+                    (
+                        content,
+                        response_format_accepted,
+                        warning_codes,
+                    ) = await self._call_model_text_tool(
+                        messages=upstream_messages,
+                        model_name=model_name,
+                    )
                 return ToolCallOutcome(
                     content=content,
                     response_format_accepted=response_format_accepted,
@@ -442,6 +668,84 @@ class OpenAIAggregationBackend:
                 fallback_trigger=fallback_trigger,
             )
         raise RuntimeError("OpenAI model chain exhausted without returning or raising")
+
+    async def _call_model_text_tool(
+        self,
+        *,
+        messages: list[ChatCompletionMessageParam],
+        model_name: str,
+    ) -> tuple[str, bool, list[str]]:
+        warning_codes: list[str] = []
+        response_format_accepted = True
+        structured_output_supported = self._structured_output_supported(model_name)
+        attempts_remaining = self.settings.openai_max_retries + 1
+
+        while attempts_remaining > 0:
+            try:
+                if structured_output_supported:
+                    response = await _maybe_await(
+                        self.client.chat.completions.create(
+                            model=model_name,
+                            messages=messages,
+                            response_format=STRUCTURED_RESPONSE_FORMAT,
+                        )
+                    )
+                else:
+                    response_format_accepted = False
+                    warning_codes.append("structured_output_not_supported")
+                    response = await self._fallback_completion(
+                        messages,
+                        model_name=model_name,
+                    )
+                return (
+                    _message_content(response),
+                    response_format_accepted,
+                    warning_codes,
+                )
+            except UpstreamSearchError as exc:
+                if not _is_retryable_empty_response_error(exc):
+                    raise exc
+                attempts_remaining -= 1
+                if attempts_remaining == 0:
+                    raise exc
+                retries_taken = self.settings.openai_max_retries - attempts_remaining
+                delay_seconds = _calculate_empty_response_retry_delay(retries_taken)
+                LOGGER.warning(
+                    "Upstream provider returned empty response content; retrying "
+                    "[model=%s error_type=%s remaining_attempts=%s delay_seconds=%.6f]",
+                    model_name,
+                    exc.log_context.error_type,
+                    attempts_remaining,
+                    delay_seconds,
+                )
+                await asyncio.sleep(delay_seconds)
+            except openai.BadRequestError as exc:
+                if not _is_structured_output_unsupported_error(exc):
+                    raise _build_upstream_error(exc) from exc
+
+                LOGGER.warning(
+                    "Structured response rejected by upstream provider; retrying "
+                    "plain text [model=%s].",
+                    model_name,
+                )
+                warning_codes.append("structured_output_not_supported")
+                response_format_accepted = False
+                structured_output_supported = False
+                _mark_structured_output_unsupported(
+                    self._structured_output_cache_key(model_name)
+                )
+            except (
+                openai.APIConnectionError,
+                openai.APITimeoutError,
+                openai.AuthenticationError,
+                openai.RateLimitError,
+                openai.APIStatusError,
+            ) as exc:
+                raise _build_upstream_error(exc) from exc
+            except openai.OpenAIError as exc:
+                raise _build_upstream_error(exc) from exc
+
+        raise RuntimeError("OpenAI retry loop exhausted without returning or raising")
 
     async def _call_model_json_tool(
         self,
@@ -863,6 +1167,52 @@ def _tool_diagnostics(
     )
 
 
+def _conversation_continue_error_result(
+    *,
+    conversation_id: str,
+    provider: str,
+    model: str,
+    backend_kind: str | None,
+    code: str,
+    message: str,
+    retryable: bool,
+) -> ConversationContinueResult:
+    return ConversationContinueResult(
+        request=ConversationRequestEcho(conversation_id=conversation_id),
+        assistant_message="",
+        diagnostics=ToolDiagnostics(
+            status="error",
+            provider=ProviderInfo(name=provider, model=model),
+            backend_kind=backend_kind,
+            warnings=[],
+            error=ErrorInfo(code=code, message=message, retryable=retryable),
+        ),
+    )
+
+
+def _conversation_get_error_result(
+    *,
+    conversation_id: str,
+    provider: str,
+    model: str,
+    backend_kind: str | None,
+    code: str,
+    message: str,
+    retryable: bool,
+) -> ConversationGetResult:
+    return ConversationGetResult(
+        request=ConversationRequestEcho(conversation_id=conversation_id),
+        messages=[],
+        diagnostics=ToolDiagnostics(
+            status="error",
+            provider=ProviderInfo(name=provider, model=model),
+            backend_kind=backend_kind,
+            warnings=[],
+            error=ErrorInfo(code=code, message=message, retryable=retryable),
+        ),
+    )
+
+
 def _dedupe_warning_codes(codes: list[str]) -> list[str]:
     merged: list[str] = []
     seen: set[str] = set()
@@ -906,6 +1256,25 @@ def _with_attempted_models(
         final_model=attempted_models[-1] if attempted_models else None,
         fallback_trigger=fallback_trigger,
     )
+
+
+def _new_conversation_id() -> str:
+    return f"conv_{secrets.token_hex(8)}"
+
+
+def _timestamp_now() -> str:
+    return dt.datetime.now(dt.UTC).isoformat()
+
+
+def _chat_message_from_conversation_message(
+    message: ConversationMessage,
+) -> ChatCompletionMessageParam:
+    if message.role == "assistant":
+        return {
+            "role": "assistant",
+            "content": message.content,
+        }
+    return ChatCompletionUserMessageParam(role="user", content=message.content)
 
 
 def _domain_from_url(url: str) -> str:

@@ -13,6 +13,9 @@ import pytest
 import mcp_searchbridge.openai_backend as openai_backend_module
 from mcp_searchbridge.errors import UpstreamSearchError
 from mcp_searchbridge.models import (
+    ConversationContinueRequest,
+    ConversationGetRequest,
+    ConversationStartRequest,
     ExtractUrlRequest,
     FindOfficialDocsRequest,
     SearchRequest,
@@ -231,6 +234,120 @@ class _FallbackChatCompletionsHandler(BaseHTTPRequestHandler):
                             "- Fallback snippet"
                         ),
                     },
+                    "finish_reason": "stop",
+                }
+            ],
+        }
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(response).encode("utf-8"))
+
+    def log_message(self, format: str, *args: object) -> None:  # noqa: A003
+        return
+
+
+class _ConversationChatHandler(BaseHTTPRequestHandler):
+    request_payloads: list[dict[str, object]] = []
+
+    def do_POST(self) -> None:  # noqa: N802
+        if self.path != "/v1/chat/completions":
+            self.send_response(404)
+            self.end_headers()
+            return
+
+        length = int(self.headers["Content-Length"])
+        payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        type(self).request_payloads.append(payload)
+        messages = payload["messages"]
+        user_messages = [
+            item["content"]
+            for item in messages
+            if isinstance(item, dict) and item.get("role") == "user"
+        ]
+        assistant_messages = [
+            item["content"]
+            for item in messages
+            if isinstance(item, dict) and item.get("role") == "assistant"
+        ]
+        first_user = user_messages[0]
+        marker = first_user.split("Remember this token for the next round: ", 1)[1]
+        marker = marker.split(".", 1)[0]
+
+        if len(user_messages) == 1:
+            content = marker
+        else:
+            if marker in assistant_messages[-1]:
+                content = marker
+            else:
+                content = "No token was mentioned earlier."
+
+        response = {
+            "id": "chatcmpl-conversation",
+            "object": "chat.completion",
+            "created": 1,
+            "model": payload["model"],
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": content},
+                    "finish_reason": "stop",
+                }
+            ],
+        }
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(response).encode("utf-8"))
+
+    def log_message(self, format: str, *args: object) -> None:  # noqa: A003
+        return
+
+
+class _NoisyConversationChatHandler(BaseHTTPRequestHandler):
+    request_payloads: list[dict[str, object]] = []
+
+    def do_POST(self) -> None:  # noqa: N802
+        if self.path != "/v1/chat/completions":
+            self.send_response(404)
+            self.end_headers()
+            return
+
+        length = int(self.headers["Content-Length"])
+        payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        type(self).request_payloads.append(payload)
+        messages = payload["messages"]
+        user_messages = [
+            item["content"]
+            for item in messages
+            if isinstance(item, dict) and item.get("role") == "user"
+        ]
+        assistant_messages = [
+            item["content"]
+            for item in messages
+            if isinstance(item, dict) and item.get("role") == "assistant"
+        ]
+        first_user = user_messages[0]
+        marker = first_user.split("Remember this token for the next round: ", 1)[1]
+        marker = marker.split(".", 1)[0]
+
+        if len(user_messages) == 1:
+            content = (
+                f"{marker}\n\nThe query explicitly states to reply with the exact "
+                "token."
+            )
+        else:
+            content = marker if marker in assistant_messages[-1] else "missing"
+
+        response = {
+            "id": "chatcmpl-conversation-noisy",
+            "object": "chat.completion",
+            "created": 1,
+            "model": payload["model"],
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": content},
                     "finish_reason": "stop",
                 }
             ],
@@ -929,6 +1046,216 @@ async def test_backend_normalizes_404_warning_aliases() -> None:
         assert "not_found_page" in warning_codes
         assert "404_page" not in warning_codes
         assert "page_not_found" not in warning_codes
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+async def test_backend_conversation_replays_history_for_multi_round_chat() -> None:
+    _ConversationChatHandler.request_payloads = []
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _ConversationChatHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        host, port = host_port(server.server_address)
+        settings = make_settings(
+            OPENAI_BASE_URL=f"http://{host}:{port}/v1",
+            OPENAI_MODEL="test-conversation-model",
+        )
+        backend = OpenAIAggregationBackend(settings)
+        first_message = (
+            "Remember this token for the next round: marker_backend_roundtrip. "
+            "Reply only with the exact token."
+        )
+
+        started = await backend.conversation_start(
+            ConversationStartRequest(message=first_message)
+        )
+        continued = await backend.conversation_continue(
+            ConversationContinueRequest(
+                conversation_id=started.conversation_id,
+                message=(
+                    "What token did I ask you to remember in the previous round? "
+                    "Reply only with that token."
+                ),
+            )
+        )
+        current = await backend.conversation_get(
+            ConversationGetRequest(conversation_id=started.conversation_id)
+        )
+
+        assert started.assistant_message == "marker_backend_roundtrip"
+        assert continued.assistant_message == "marker_backend_roundtrip"
+        assert len(_ConversationChatHandler.request_payloads) == 2
+        second_messages = _ConversationChatHandler.request_payloads[1]["messages"]
+        assert second_messages[1:] == [
+            {"role": "user", "content": first_message},
+            {"role": "assistant", "content": "marker_backend_roundtrip"},
+            {
+                "role": "user",
+                "content": (
+                    "What token did I ask you to remember in the previous round? "
+                    "Reply only with that token."
+                ),
+            },
+        ]
+        assert [item.role for item in current.messages] == [
+            "user",
+            "assistant",
+            "user",
+            "assistant",
+        ]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+async def test_backend_conversation_preserves_noisy_assistant_output() -> None:
+    _NoisyConversationChatHandler.request_payloads = []
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _NoisyConversationChatHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        host, port = host_port(server.server_address)
+        settings = make_settings(
+            OPENAI_BASE_URL=f"http://{host}:{port}/v1",
+            OPENAI_MODEL="test-conversation-noisy-model",
+        )
+        backend = OpenAIAggregationBackend(settings)
+        first_message = (
+            "Remember this token for the next round: marker_grok_noise. "
+            "Reply only with the exact token."
+        )
+
+        started = await backend.conversation_start(
+            ConversationStartRequest(message=first_message)
+        )
+        continued = await backend.conversation_continue(
+            ConversationContinueRequest(
+                conversation_id=started.conversation_id,
+                message=(
+                    "What token did I ask you to remember in the previous round? "
+                    "Reply only with that token."
+                ),
+            )
+        )
+
+        assert "marker_grok_noise" in started.assistant_message
+        assert continued.assistant_message == "marker_grok_noise"
+        second_messages = _NoisyConversationChatHandler.request_payloads[1]["messages"]
+        assert (
+            "The query explicitly states to reply with the exact token."
+            in second_messages[2]["content"]
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+async def test_backend_conversation_retries_empty_string_responses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _RetryingEmptyContentHandler.request_count = 0
+    _RetryingEmptyContentHandler.empty_attempts_before_success = 1
+    _RetryingEmptyContentHandler.empty_mode = "string"
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _RetryingEmptyContentHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    sleep_calls: list[float] = []
+
+    try:
+        host, port = host_port(server.server_address)
+        settings = make_settings(
+            OPENAI_BASE_URL=f"http://{host}:{port}/v1",
+            OPENAI_MODEL="test-conversation-model",
+            OPENAI_MAX_RETRIES=1,
+        )
+        backend = OpenAIAggregationBackend(settings)
+        monkeypatch.setattr(openai_backend_module.random, "random", lambda: 0.0)
+        monkeypatch.setattr(
+            openai_backend_module.asyncio,
+            "sleep",
+            lambda seconds: _record_sleep(seconds, sleep_calls),
+        )
+
+        result = await backend.conversation_start(
+            ConversationStartRequest(message="retry conversation start")
+        )
+
+        assert "Recovered after retry" in result.assistant_message
+        assert _RetryingEmptyContentHandler.request_count == 2
+        assert sleep_calls == [pytest.approx(0.5)]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+async def test_backend_conversation_retries_empty_message_content_until_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _RetryingEmptyContentHandler.request_count = 0
+    _RetryingEmptyContentHandler.empty_attempts_before_success = 3
+    _RetryingEmptyContentHandler.empty_mode = "message"
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _RetryingEmptyContentHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    sleep_calls: list[float] = []
+
+    try:
+        host, port = host_port(server.server_address)
+        settings = make_settings(
+            OPENAI_BASE_URL=f"http://{host}:{port}/v1",
+            OPENAI_MODEL="test-conversation-model",
+            OPENAI_MAX_RETRIES=1,
+        )
+        backend = OpenAIAggregationBackend(settings)
+        monkeypatch.setattr(openai_backend_module.random, "random", lambda: 0.0)
+        monkeypatch.setattr(
+            openai_backend_module.asyncio,
+            "sleep",
+            lambda seconds: _record_sleep(seconds, sleep_calls),
+        )
+
+        with pytest.raises(UpstreamSearchError) as exc_info:
+            await backend.conversation_start(
+                ConversationStartRequest(message="retry conversation start")
+            )
+
+        exc = exc_info.value
+        assert exc.client_message == "Upstream response message content was empty."
+        assert exc.error_code == "empty_upstream_response"
+        assert exc.log_context.error_type == "EmptyMessageContent"
+        assert _RetryingEmptyContentHandler.request_count == 2
+        assert sleep_calls == [pytest.approx(0.5)]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+async def test_backend_conversation_preserves_structured_output_warning() -> None:
+    _FallbackChatCompletionsHandler.request_count = 0
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _FallbackChatCompletionsHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        host, port = host_port(server.server_address)
+        settings = make_settings(
+            OPENAI_BASE_URL=f"http://{host}:{port}/v1",
+            OPENAI_MODEL="test-conversation-model",
+        )
+        backend = OpenAIAggregationBackend(settings)
+
+        result = await backend.conversation_start(
+            ConversationStartRequest(message="structured output fallback")
+        )
+
+        assert result.assistant_message.startswith("Fallback answer")
+        warning_codes = [warning.code for warning in result.diagnostics.warnings]
+        assert "structured_output_not_supported" in warning_codes
+        assert _FallbackChatCompletionsHandler.request_count == 2
     finally:
         server.shutdown()
         server.server_close()

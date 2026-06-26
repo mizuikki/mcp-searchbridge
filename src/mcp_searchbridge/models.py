@@ -142,6 +142,40 @@ class DocSourceResolutionRequest(BaseToolRequest):
         return cls._strip_required_text(value)
 
 
+class ConversationStartRequest(BaseToolRequest):
+    """Request to start a new conversation."""
+
+    message: str = Field(min_length=1)
+
+    @field_validator("message")
+    @classmethod
+    def strip_message(cls, value: str) -> str:
+        return cls._strip_required_text(value)
+
+
+class ConversationContinueRequest(BaseToolRequest):
+    """Request to continue an existing conversation."""
+
+    conversation_id: str = Field(min_length=1)
+    message: str = Field(min_length=1)
+
+    @field_validator("conversation_id", "message")
+    @classmethod
+    def strip_required_text(cls, value: str) -> str:
+        return cls._strip_required_text(value)
+
+
+class ConversationGetRequest(BaseToolRequest):
+    """Request to inspect an existing conversation."""
+
+    conversation_id: str = Field(min_length=1)
+
+    @field_validator("conversation_id")
+    @classmethod
+    def strip_conversation_id(cls, value: str) -> str:
+        return cls._strip_required_text(value)
+
+
 class WarningInfo(BaseModel):
     """Structured warning returned to callers."""
 
@@ -271,6 +305,43 @@ class SearchResult(BaseModel):
     summary: Summary
     sources: list[SearchSource] = Field(default_factory=list)
     diagnostics: SearchDiagnostics
+
+
+class ConversationMessage(BaseModel):
+    """One stored conversation message."""
+
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1)
+
+
+class ConversationRequestEcho(BaseModel):
+    """Echo of conversation operation inputs."""
+
+    conversation_id: str = Field(min_length=1)
+
+
+class ConversationStartResult(BaseModel):
+    """Result of starting a conversation."""
+
+    conversation_id: str = ""
+    assistant_message: str = ""
+    diagnostics: ToolDiagnostics
+
+
+class ConversationContinueResult(BaseModel):
+    """Result of continuing a conversation."""
+
+    request: ConversationRequestEcho
+    assistant_message: str = ""
+    diagnostics: ToolDiagnostics
+
+
+class ConversationGetResult(BaseModel):
+    """Result of fetching a conversation state."""
+
+    request: ConversationRequestEcho
+    messages: list[ConversationMessage] = Field(default_factory=list)
+    diagnostics: ToolDiagnostics
 
 
 class ExtractRequestEcho(BaseModel):

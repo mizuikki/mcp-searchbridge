@@ -9,6 +9,14 @@ import pytest
 from mcp_searchbridge.errors import UpstreamLogContext, UpstreamSearchError
 from mcp_searchbridge.models import (
     Citation,
+    ConversationContinueRequest,
+    ConversationContinueResult,
+    ConversationGetRequest,
+    ConversationGetResult,
+    ConversationMessage,
+    ConversationRequestEcho,
+    ConversationStartRequest,
+    ConversationStartResult,
     DocSourceResolutionRequest,
     DocSourceResolutionRequestEcho,
     DocSourceResolutionResult,
@@ -37,6 +45,7 @@ from mcp_searchbridge.models import (
     Summary,
     ToolDiagnostics,
 )
+from mcp_searchbridge.private_backend import PrivateHttpAggregationBackend
 from mcp_searchbridge.server import create_server
 from tests.helpers import make_settings, optional_url, url
 
@@ -52,6 +61,10 @@ class FakeBackend:
         self.outline_requests: list[OutlineUrlRequest] = []
         self.docs_qa_requests: list[DocsQARequest] = []
         self.source_requests: list[DocSourceResolutionRequest] = []
+        self.conversations: dict[str, list[ConversationMessage]] = {}
+        self.conversation_start_requests: list[ConversationStartRequest] = []
+        self.conversation_continue_requests: list[ConversationContinueRequest] = []
+        self.conversation_get_requests: list[ConversationGetRequest] = []
 
     def search_web(self, request: SearchRequest) -> SearchResult:
         self.search_requests.append(request)
@@ -234,6 +247,98 @@ class FakeBackend:
             ),
         )
 
+    def conversation_start(
+        self,
+        request: ConversationStartRequest,
+    ) -> ConversationStartResult:
+        self.conversation_start_requests.append(request)
+        conversation_id = "conv_fake_1"
+        self.conversations[conversation_id] = [
+            ConversationMessage(role="user", content=request.message),
+            ConversationMessage(role="assistant", content=f"Echo: {request.message}"),
+        ]
+        return ConversationStartResult(
+            conversation_id=conversation_id,
+            assistant_message=f"Echo: {request.message}",
+            diagnostics=ToolDiagnostics(
+                status="ok",
+                provider=ProviderInfo(
+                    name=self.provider_name,
+                    model=self.provider_model,
+                ),
+                backend_kind=self.backend_kind,
+                warnings=[],
+            ),
+        )
+
+    def conversation_continue(
+        self,
+        request: ConversationContinueRequest,
+    ) -> ConversationContinueResult:
+        self.conversation_continue_requests.append(request)
+        messages = self.conversations.get(request.conversation_id)
+        if messages is None:
+            return ConversationContinueResult(
+                request=ConversationRequestEcho(
+                    conversation_id=request.conversation_id,
+                ),
+                assistant_message="",
+                diagnostics=ToolDiagnostics(
+                    status="error",
+                    provider=ProviderInfo(
+                        name=self.provider_name,
+                        model=self.provider_model,
+                    ),
+                    backend_kind=self.backend_kind,
+                    warnings=[],
+                ),
+            )
+        messages.extend(
+            [
+                ConversationMessage(role="user", content=request.message),
+                ConversationMessage(
+                    role="assistant",
+                    content=f"Echo: {request.message}",
+                ),
+            ]
+        )
+        return ConversationContinueResult(
+            request=ConversationRequestEcho(
+                conversation_id=request.conversation_id,
+            ),
+            assistant_message=f"Echo: {request.message}",
+            diagnostics=ToolDiagnostics(
+                status="ok",
+                provider=ProviderInfo(
+                    name=self.provider_name,
+                    model=self.provider_model,
+                ),
+                backend_kind=self.backend_kind,
+                warnings=[],
+            ),
+        )
+
+    def conversation_get(
+        self,
+        request: ConversationGetRequest,
+    ) -> ConversationGetResult:
+        self.conversation_get_requests.append(request)
+        return ConversationGetResult(
+            request=ConversationRequestEcho(
+                conversation_id=request.conversation_id,
+            ),
+            messages=list(self.conversations.get(request.conversation_id, [])),
+            diagnostics=ToolDiagnostics(
+                status="ok",
+                provider=ProviderInfo(
+                    name=self.provider_name,
+                    model=self.provider_model,
+                ),
+                backend_kind=self.backend_kind,
+                warnings=[],
+            ),
+        )
+
 
 class AsyncCoordinatedBackend:
     provider_name = FakeBackend.provider_name
@@ -271,6 +376,24 @@ class AsyncCoordinatedBackend:
     ) -> DocSourceResolutionResult:
         return self.backend.resolve_doc_source(request)
 
+    def conversation_start(
+        self,
+        request: ConversationStartRequest,
+    ) -> ConversationStartResult:
+        return self.backend.conversation_start(request)
+
+    def conversation_continue(
+        self,
+        request: ConversationContinueRequest,
+    ) -> ConversationContinueResult:
+        return self.backend.conversation_continue(request)
+
+    def conversation_get(
+        self,
+        request: ConversationGetRequest,
+    ) -> ConversationGetResult:
+        return self.backend.conversation_get(request)
+
 
 class FailingBackend(FakeBackend):
     def __init__(self, exc: UpstreamSearchError) -> None:
@@ -298,6 +421,24 @@ class FailingBackend(FakeBackend):
     ) -> DocSourceResolutionResult:
         raise self.exc
 
+    def conversation_start(
+        self,
+        request: ConversationStartRequest,
+    ) -> ConversationStartResult:
+        raise self.exc
+
+    def conversation_continue(
+        self,
+        request: ConversationContinueRequest,
+    ) -> ConversationContinueResult:
+        raise self.exc
+
+    def conversation_get(
+        self,
+        request: ConversationGetRequest,
+    ) -> ConversationGetResult:
+        raise self.exc
+
 
 def test_create_server_registers_tools() -> None:
     settings = make_settings(OPENAI_MODEL="fake-model")
@@ -309,6 +450,9 @@ def test_create_server_registers_tools() -> None:
     tool_names = {tool.name for tool in tools}
 
     assert tool_names == {
+        "conversation_continue",
+        "conversation_get",
+        "conversation_start",
         "search_web",
         "extract_url",
         "outline_url",
@@ -340,6 +484,49 @@ def test_search_tool_calls_can_overlap() -> None:
         assert [result.query.text for result in results] == [
             "parallel request 0",
             "parallel request 1",
+        ]
+
+    asyncio.run(run_calls())
+
+
+def test_conversation_tools_round_trip_state() -> None:
+    settings = make_settings(OPENAI_MODEL="fake-model")
+    backend = FakeBackend()
+    server = create_server(settings=settings, backend=backend)
+
+    async def run_calls() -> None:
+        start = await server._tool_manager.call_tool(
+            "conversation_start",
+            {"message": "hello"},
+        )
+        assert start.conversation_id == "conv_fake_1"
+        assert start.assistant_message == "Echo: hello"
+
+        continued = await server._tool_manager.call_tool(
+            "conversation_continue",
+            {
+                "conversation_id": start.conversation_id,
+                "message": "next question",
+            },
+        )
+        assert continued.request.conversation_id == start.conversation_id
+        assert continued.assistant_message == "Echo: next question"
+
+        current = await server._tool_manager.call_tool(
+            "conversation_get",
+            {"conversation_id": start.conversation_id},
+        )
+        assert [message.role for message in current.messages] == [
+            "user",
+            "assistant",
+            "user",
+            "assistant",
+        ]
+        assert [message.content for message in current.messages] == [
+            "hello",
+            "Echo: hello",
+            "next question",
+            "Echo: next question",
         ]
 
     asyncio.run(run_calls())
@@ -515,5 +702,26 @@ def test_server_includes_fallback_attempt_metadata_in_error_results() -> None:
         ]
         assert result.diagnostics.fallback_count == 1
         assert result.diagnostics.fallback_trigger == "rate_limited"
+
+    asyncio.run(run_call())
+
+
+def test_private_backend_conversation_tools_are_unsupported() -> None:
+    settings = make_settings(
+        SEARCHBRIDGE_BACKEND_KIND="private_http",
+        SEARCHBRIDGE_PRIVATE_BACKEND_URL="https://private.example.com",
+    )
+    backend = PrivateHttpAggregationBackend(settings, client=object())
+    server = create_server(settings=settings, backend=backend)
+
+    async def run_call() -> None:
+        result = await server._tool_manager.call_tool(
+            "conversation_start",
+            {"message": "hello"},
+        )
+
+        assert result.diagnostics.error is not None
+        assert result.diagnostics.error.code == "unsupported_backend"
+        assert result.diagnostics.error.retryable is False
 
     asyncio.run(run_call())

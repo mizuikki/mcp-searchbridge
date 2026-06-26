@@ -219,6 +219,69 @@ Output shape:
 }
 ```
 
+### `conversation_start`
+
+Purpose: start an explicit multi-round conversation backed by the configured
+OpenAI-compatible `/chat/completions` endpoint.
+
+Input:
+
+```json
+{
+  "message": "Remember this token for the next round: marker_123."
+}
+```
+
+Output highlights:
+
+- `conversation_id`
+- `assistant_message`
+- `diagnostics`
+
+Behavior notes:
+
+- v1 is supported only when `SEARCHBRIDGE_BACKEND_KIND=openai`
+- conversation state is stored in memory only and is lost on process restart
+
+### `conversation_continue`
+
+Purpose: continue a previously started conversation by replaying prior
+conversation history to the upstream model.
+
+Input:
+
+```json
+{
+  "conversation_id": "conv_abcd1234",
+  "message": "What token did I ask you to remember?"
+}
+```
+
+Output highlights:
+
+- `request.conversation_id`
+- `assistant_message`
+- `diagnostics`
+
+### `conversation_get`
+
+Purpose: inspect the current in-memory message history for an existing
+conversation.
+
+Input:
+
+```json
+{
+  "conversation_id": "conv_abcd1234"
+}
+```
+
+Output highlights:
+
+- `request.conversation_id`
+- `messages[]`
+- `diagnostics`
+
 ### `extract_url`
 
 Purpose: fetch the main body of a page as text or markdown-like content.

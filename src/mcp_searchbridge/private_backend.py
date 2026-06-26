@@ -14,18 +14,28 @@ from pydantic import BaseModel, ValidationError
 from .config import Settings
 from .errors import UpstreamLogContext, UpstreamSearchError
 from .models import (
+    ConversationContinueRequest,
+    ConversationContinueResult,
+    ConversationGetRequest,
+    ConversationGetResult,
+    ConversationRequestEcho,
+    ConversationStartRequest,
+    ConversationStartResult,
     DocSourceResolutionRequest,
     DocSourceResolutionResult,
     DocsQARequest,
     DocsQAResult,
+    ErrorInfo,
     ExtractResult,
     ExtractUrlRequest,
     FindOfficialDocsRequest,
     OfficialDocsResult,
     OutlineResult,
     OutlineUrlRequest,
+    ProviderInfo,
     SearchRequest,
     SearchResult,
+    ToolDiagnostics,
 )
 from .openai_backend import OpenAIAggregationBackend
 
@@ -123,6 +133,38 @@ class PrivateHttpAggregationBackend:
             "v1/resolve_doc_source",
             request,
             DocSourceResolutionResult,
+        )
+
+    async def conversation_start(
+        self,
+        request: ConversationStartRequest,
+    ) -> ConversationStartResult:
+        return _conversation_start_unsupported_result(
+            provider=self.provider_name,
+            model=self.provider_model,
+            backend_kind=self.backend_kind,
+        )
+
+    async def conversation_continue(
+        self,
+        request: ConversationContinueRequest,
+    ) -> ConversationContinueResult:
+        return _conversation_continue_unsupported_result(
+            conversation_id=request.conversation_id,
+            provider=self.provider_name,
+            model=self.provider_model,
+            backend_kind=self.backend_kind,
+        )
+
+    async def conversation_get(
+        self,
+        request: ConversationGetRequest,
+    ) -> ConversationGetResult:
+        return _conversation_get_unsupported_result(
+            conversation_id=request.conversation_id,
+            provider=self.provider_name,
+            model=self.provider_model,
+            backend_kind=self.backend_kind,
         )
 
     async def _call_or_fallback(
@@ -357,3 +399,78 @@ def _coerce_retryable(value: object) -> bool:
     if isinstance(value, bool):
         return value
     return False
+
+
+def _unsupported_backend_diagnostics(
+    *,
+    provider: str,
+    model: str,
+    backend_kind: str,
+) -> ToolDiagnostics:
+    return ToolDiagnostics(
+        status="error",
+        provider=ProviderInfo(name=provider, model=model),
+        backend_kind=backend_kind,
+        warnings=[],
+        error=ErrorInfo(
+            code="unsupported_backend",
+            message=(
+                "Conversation tools are only supported with "
+                "SEARCHBRIDGE_BACKEND_KIND=openai in v1."
+            ),
+            retryable=False,
+        ),
+    )
+
+
+def _conversation_start_unsupported_result(
+    *,
+    provider: str,
+    model: str,
+    backend_kind: str,
+) -> ConversationStartResult:
+    return ConversationStartResult(
+        conversation_id="",
+        assistant_message="",
+        diagnostics=_unsupported_backend_diagnostics(
+            provider=provider,
+            model=model,
+            backend_kind=backend_kind,
+        ),
+    )
+
+
+def _conversation_continue_unsupported_result(
+    *,
+    conversation_id: str,
+    provider: str,
+    model: str,
+    backend_kind: str,
+) -> ConversationContinueResult:
+    return ConversationContinueResult(
+        request=ConversationRequestEcho(conversation_id=conversation_id),
+        assistant_message="",
+        diagnostics=_unsupported_backend_diagnostics(
+            provider=provider,
+            model=model,
+            backend_kind=backend_kind,
+        ),
+    )
+
+
+def _conversation_get_unsupported_result(
+    *,
+    conversation_id: str,
+    provider: str,
+    model: str,
+    backend_kind: str,
+) -> ConversationGetResult:
+    return ConversationGetResult(
+        request=ConversationRequestEcho(conversation_id=conversation_id),
+        messages=[],
+        diagnostics=_unsupported_backend_diagnostics(
+            provider=provider,
+            model=model,
+            backend_kind=backend_kind,
+        ),
+    )

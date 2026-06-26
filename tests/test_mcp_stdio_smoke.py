@@ -139,6 +139,9 @@ def test_mcp_stdio_tools_list_and_call() -> None:
                 tools = await session.list_tools()
                 tool_names = {tool.name for tool in tools.tools}
                 assert tool_names == {
+                    "conversation_continue",
+                    "conversation_get",
+                    "conversation_start",
                     "search_web",
                     "extract_url",
                     "outline_url",

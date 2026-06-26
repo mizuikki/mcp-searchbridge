@@ -15,6 +15,13 @@ from .backend_factory import build_backend
 from .config import Settings, get_settings
 from .errors import SearchBridgeError, UpstreamSearchError
 from .models import (
+    ConversationContinueRequest,
+    ConversationContinueResult,
+    ConversationGetRequest,
+    ConversationGetResult,
+    ConversationRequestEcho,
+    ConversationStartRequest,
+    ConversationStartResult,
     DocSourceResolutionRequest,
     DocSourceResolutionRequestEcho,
     DocSourceResolutionResult,
@@ -78,6 +85,18 @@ class AggregationBackend(Protocol):
     def resolve_doc_source(
         self, request: DocSourceResolutionRequest
     ) -> DocSourceResolutionResult | Awaitable[DocSourceResolutionResult]: ...
+
+    def conversation_start(
+        self, request: ConversationStartRequest
+    ) -> ConversationStartResult | Awaitable[ConversationStartResult]: ...
+
+    def conversation_continue(
+        self, request: ConversationContinueRequest
+    ) -> ConversationContinueResult | Awaitable[ConversationContinueResult]: ...
+
+    def conversation_get(
+        self, request: ConversationGetRequest
+    ) -> ConversationGetResult | Awaitable[ConversationGetResult]: ...
 
 
 def create_server(
@@ -193,6 +212,143 @@ def create_server(
                 backend_kind=_backend_kind(aggregation_backend),
                 code="search_request_failed",
                 message=f"Search request failed: {exc}",
+                retryable=False,
+            )
+
+    @mcp.tool(
+        name="conversation_start",
+        description="Start a new multi-round conversation with the upstream model.",
+    )
+    async def conversation_start(message: str) -> ConversationStartResult:
+        try:
+            request = ConversationStartRequest(message=message)
+            return await _maybe_await(aggregation_backend.conversation_start(request))
+        except ValidationError as exc:
+            LOGGER.error("conversation_start validation failed: %s", exc)
+            return _conversation_start_error_result(
+                provider=aggregation_backend.provider_name,
+                model=_backend_model(aggregation_backend, active_settings),
+                backend_kind=_backend_kind(aggregation_backend),
+                code="invalid_request",
+                message=f"Invalid conversation start request: {exc}",
+                retryable=False,
+            )
+        except UpstreamSearchError as exc:
+            _log_upstream_failure("conversation_start", exc)
+            return _conversation_start_error_result(
+                provider=aggregation_backend.provider_name,
+                model=_error_model(exc, aggregation_backend, active_settings),
+                backend_kind=_backend_kind(aggregation_backend),
+                code=exc.error_code or "upstream_request_failed",
+                message=exc.client_message,
+                retryable=exc.retryable,
+                attempted_models=_error_attempted_models(exc),
+                fallback_trigger=exc.fallback_trigger,
+            )
+        except SearchBridgeError as exc:
+            LOGGER.error("conversation_start failed: %s", exc)
+            return _conversation_start_error_result(
+                provider=aggregation_backend.provider_name,
+                model=_backend_model(aggregation_backend, active_settings),
+                backend_kind=_backend_kind(aggregation_backend),
+                code="conversation_request_failed",
+                message=f"Conversation request failed: {exc}",
+                retryable=False,
+            )
+
+    @mcp.tool(
+        name="conversation_continue",
+        description="Continue an existing multi-round conversation.",
+    )
+    async def conversation_continue(
+        conversation_id: str,
+        message: str,
+    ) -> ConversationContinueResult:
+        try:
+            request = ConversationContinueRequest(
+                conversation_id=conversation_id,
+                message=message,
+            )
+            return await _maybe_await(
+                aggregation_backend.conversation_continue(request)
+            )
+        except ValidationError as exc:
+            LOGGER.error("conversation_continue validation failed: %s", exc)
+            return _conversation_continue_error_result(
+                conversation_id=conversation_id,
+                provider=aggregation_backend.provider_name,
+                model=_backend_model(aggregation_backend, active_settings),
+                backend_kind=_backend_kind(aggregation_backend),
+                code="invalid_request",
+                message=f"Invalid conversation continue request: {exc}",
+                retryable=False,
+            )
+        except UpstreamSearchError as exc:
+            _log_upstream_failure("conversation_continue", exc)
+            return _conversation_continue_error_result(
+                conversation_id=conversation_id,
+                provider=aggregation_backend.provider_name,
+                model=_error_model(exc, aggregation_backend, active_settings),
+                backend_kind=_backend_kind(aggregation_backend),
+                code=exc.error_code or "upstream_request_failed",
+                message=exc.client_message,
+                retryable=exc.retryable,
+                attempted_models=_error_attempted_models(exc),
+                fallback_trigger=exc.fallback_trigger,
+            )
+        except SearchBridgeError as exc:
+            LOGGER.error("conversation_continue failed: %s", exc)
+            return _conversation_continue_error_result(
+                conversation_id=conversation_id,
+                provider=aggregation_backend.provider_name,
+                model=_backend_model(aggregation_backend, active_settings),
+                backend_kind=_backend_kind(aggregation_backend),
+                code="conversation_request_failed",
+                message=f"Conversation request failed: {exc}",
+                retryable=False,
+            )
+
+    @mcp.tool(
+        name="conversation_get",
+        description="Inspect the stored state of an existing conversation.",
+    )
+    async def conversation_get(conversation_id: str) -> ConversationGetResult:
+        try:
+            request = ConversationGetRequest(conversation_id=conversation_id)
+            return await _maybe_await(aggregation_backend.conversation_get(request))
+        except ValidationError as exc:
+            LOGGER.error("conversation_get validation failed: %s", exc)
+            return _conversation_get_error_result(
+                conversation_id=conversation_id,
+                provider=aggregation_backend.provider_name,
+                model=_backend_model(aggregation_backend, active_settings),
+                backend_kind=_backend_kind(aggregation_backend),
+                code="invalid_request",
+                message=f"Invalid conversation get request: {exc}",
+                retryable=False,
+            )
+        except UpstreamSearchError as exc:
+            _log_upstream_failure("conversation_get", exc)
+            return _conversation_get_error_result(
+                conversation_id=conversation_id,
+                provider=aggregation_backend.provider_name,
+                model=_error_model(exc, aggregation_backend, active_settings),
+                backend_kind=_backend_kind(aggregation_backend),
+                code=exc.error_code or "upstream_request_failed",
+                message=exc.client_message,
+                retryable=exc.retryable,
+                attempted_models=_error_attempted_models(exc),
+                fallback_trigger=exc.fallback_trigger,
+            )
+        except SearchBridgeError as exc:
+            LOGGER.error("conversation_get failed: %s", exc)
+            return _conversation_get_error_result(
+                conversation_id=conversation_id,
+                provider=aggregation_backend.provider_name,
+                model=_backend_model(aggregation_backend, active_settings),
+                backend_kind=_backend_kind(aggregation_backend),
+                code="conversation_request_failed",
+                message=f"Conversation request failed: {exc}",
                 retryable=False,
             )
 
@@ -534,6 +690,89 @@ def _extract_error_result(
         content_format="text",
         truncated=False,
         likely_rewritten=True,
+        diagnostics=ToolDiagnostics(
+            status="error",
+            provider=_provider_info(provider, model),
+            backend_kind=backend_kind,
+            attempted_models=list(attempted_models or []),
+            fallback_count=_fallback_count(attempted_models),
+            fallback_trigger=fallback_trigger,
+            warnings=[],
+            error=ErrorInfo(code=code, message=message, retryable=retryable),
+        ),
+    )
+
+
+def _conversation_start_error_result(
+    *,
+    provider: str,
+    model: str,
+    backend_kind: str | None,
+    code: str,
+    message: str,
+    retryable: bool,
+    attempted_models: list[str] | None = None,
+    fallback_trigger: str | None = None,
+) -> ConversationStartResult:
+    return ConversationStartResult(
+        conversation_id="",
+        assistant_message="",
+        diagnostics=ToolDiagnostics(
+            status="error",
+            provider=_provider_info(provider, model),
+            backend_kind=backend_kind,
+            attempted_models=list(attempted_models or []),
+            fallback_count=_fallback_count(attempted_models),
+            fallback_trigger=fallback_trigger,
+            warnings=[],
+            error=ErrorInfo(code=code, message=message, retryable=retryable),
+        ),
+    )
+
+
+def _conversation_continue_error_result(
+    *,
+    conversation_id: str,
+    provider: str,
+    model: str,
+    backend_kind: str | None,
+    code: str,
+    message: str,
+    retryable: bool,
+    attempted_models: list[str] | None = None,
+    fallback_trigger: str | None = None,
+) -> ConversationContinueResult:
+    return ConversationContinueResult(
+        request=ConversationRequestEcho(conversation_id=conversation_id),
+        assistant_message="",
+        diagnostics=ToolDiagnostics(
+            status="error",
+            provider=_provider_info(provider, model),
+            backend_kind=backend_kind,
+            attempted_models=list(attempted_models or []),
+            fallback_count=_fallback_count(attempted_models),
+            fallback_trigger=fallback_trigger,
+            warnings=[],
+            error=ErrorInfo(code=code, message=message, retryable=retryable),
+        ),
+    )
+
+
+def _conversation_get_error_result(
+    *,
+    conversation_id: str,
+    provider: str,
+    model: str,
+    backend_kind: str | None,
+    code: str,
+    message: str,
+    retryable: bool,
+    attempted_models: list[str] | None = None,
+    fallback_trigger: str | None = None,
+) -> ConversationGetResult:
+    return ConversationGetResult(
+        request=ConversationRequestEcho(conversation_id=conversation_id),
+        messages=[],
         diagnostics=ToolDiagnostics(
             status="error",
             provider=_provider_info(provider, model),

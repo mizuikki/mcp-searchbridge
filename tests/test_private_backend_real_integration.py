@@ -45,6 +45,9 @@ def test_private_http_real_integration_happy_paths() -> None:
                 tools = await session.list_tools()
                 tool_names = {tool.name for tool in tools.tools}
                 assert tool_names == {
+                    "conversation_continue",
+                    "conversation_get",
+                    "conversation_start",
                     "search_web",
                     "extract_url",
                     "outline_url",
