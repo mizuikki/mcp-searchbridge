@@ -16,7 +16,14 @@ from threading import Lock, Thread
 import httpx
 import pytest
 
-from tests.helpers import REPO_ROOT, SEARCHBRIDGE_CORE_ROOT, find_free_port, host_port
+from tests.helpers import (
+    REPO_ROOT,
+    SEARCHBRIDGE_CORE_ROOT,
+    find_free_port,
+    host_port,
+    searchbridge_core_workspace_available,
+    searchbridge_core_workspace_unavailable_reason,
+)
 
 PRIVATE_TOKEN = "compose-secret-token"
 COMPOSE_SERVICES = (
@@ -26,6 +33,12 @@ COMPOSE_SERVICES = (
     "searchbridge-core-api",
     "searchbridge-core-worker",
     "mcp-searchbridge",
+)
+
+_COMPOSE_SKIP_REASON = (
+    searchbridge_core_workspace_unavailable_reason()
+    if not searchbridge_core_workspace_available()
+    else "docker compose is unavailable"
 )
 
 
@@ -361,7 +374,10 @@ def _wait_for_job_completion(
     raise RuntimeError(msg)
 
 
-@pytest.mark.skipif(not _docker_available(), reason="docker compose is unavailable")
+@pytest.mark.skipif(
+    not _docker_available() or not searchbridge_core_workspace_available(),
+    reason=_COMPOSE_SKIP_REASON,
+)
 def test_compose_topology_builds_from_workspace_sources_and_serves_db_backed_api() -> (
     None
 ):

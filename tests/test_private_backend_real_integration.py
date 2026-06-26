@@ -3,12 +3,23 @@ from __future__ import annotations
 import asyncio
 
 import httpx
+import pytest
 from mcp.client.session import ClientSession
 from mcp.client.stdio import stdio_client
 
-from tests.helpers import local_mcp_server_params, run_local_searchbridge_core_api
+from tests.helpers import (
+    local_mcp_server_params,
+    run_local_searchbridge_core_api,
+    searchbridge_core_workspace_available,
+    searchbridge_core_workspace_unavailable_reason,
+)
 
 PRIVATE_TOKEN = "integration-secret-token"
+
+pytestmark = pytest.mark.skipif(
+    not searchbridge_core_workspace_available(),
+    reason=searchbridge_core_workspace_unavailable_reason(),
+)
 
 
 def test_private_http_real_integration_happy_paths() -> None:

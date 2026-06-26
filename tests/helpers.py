@@ -27,6 +27,25 @@ SEARCHBRIDGE_CORE_BOOTSTRAP_FIXTURE = (
 )
 
 
+def searchbridge_core_workspace_available() -> bool:
+    return (
+        SEARCHBRIDGE_CORE_ROOT.is_dir()
+        and SEARCHBRIDGE_CORE_BOOTSTRAP_FIXTURE.is_file()
+    )
+
+
+def searchbridge_core_workspace_unavailable_reason() -> str:
+    if not SEARCHBRIDGE_CORE_ROOT.is_dir():
+        return (
+            "local searchbridge-core workspace is unavailable at "
+            f"{SEARCHBRIDGE_CORE_ROOT}"
+        )
+    return (
+        "searchbridge-core bootstrap fixture is unavailable at "
+        f"{SEARCHBRIDGE_CORE_BOOTSTRAP_FIXTURE}"
+    )
+
+
 def make_settings(**overrides: Any) -> Settings:
     payload: dict[str, Any] = {
         "OPENAI_API_KEY": "test-key",
