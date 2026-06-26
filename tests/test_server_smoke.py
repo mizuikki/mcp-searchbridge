@@ -462,6 +462,60 @@ def test_create_server_registers_tools() -> None:
     }
 
 
+def test_create_server_registers_tool_descriptions() -> None:
+    settings = make_settings(OPENAI_MODEL="fake-model")
+    backend = FakeBackend()
+
+    server = create_server(settings=settings, backend=backend)
+
+    tools = {tool.name: tool.description for tool in server._tool_manager.list_tools()}
+
+    assert tools == {
+        "search_web": (
+            "Search the web for current, source-backed information. "
+            "Use for broad discovery when you do not already have a specific "
+            "URL or docs page."
+        ),
+        "conversation_start": (
+            "Start a new stateful conversation. "
+            "Use when you need follow-up turns to share context across "
+            "multiple calls."
+        ),
+        "conversation_continue": (
+            "Continue a previously started stateful conversation by ID. "
+            "Use after conversation_start to keep context."
+        ),
+        "conversation_get": (
+            "Inspect the stored state of a conversation by ID. "
+            "Use when you need to recover context without asking a new "
+            "question."
+        ),
+        "extract_url": (
+            "Extract and clean the main content from a URL. "
+            "Use for full-page reading, not for search or site discovery."
+        ),
+        "outline_url": (
+            "Summarize a URL or llms.txt-like index into a structured "
+            "outline. Use to inspect site structure before reading pages in "
+            "detail."
+        ),
+        "docs_qa": (
+            "Answer a question from official documentation, optionally scoped "
+            "to a specific docs URL. Use when you want a docs-grounded answer "
+            "instead of broad web search."
+        ),
+        "find_official_docs": (
+            "Find canonical documentation entry points for a topic or "
+            "library. Use when you need the official source before asking a "
+            "question."
+        ),
+        "resolve_doc_source": (
+            "Classify an input as a page URL, llms.txt, docs question, or "
+            "web search query. Use to route the request to the right tool."
+        ),
+    }
+
+
 def test_search_tool_calls_can_overlap() -> None:
     settings = make_settings(OPENAI_MODEL="fake-model")
     backend = AsyncCoordinatedBackend()

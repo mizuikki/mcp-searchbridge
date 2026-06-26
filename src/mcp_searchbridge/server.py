@@ -132,7 +132,9 @@ def create_server(
     @mcp.tool(
         name="search_web",
         description=(
-            "Search the web through an upstream OpenAI-compatible chat provider."
+            "Search the web for current, source-backed information. "
+            "Use for broad discovery when you do not already have a specific "
+            "URL or docs page."
         ),
     )
     async def search_web(
@@ -217,7 +219,11 @@ def create_server(
 
     @mcp.tool(
         name="conversation_start",
-        description="Start a new multi-round conversation with the upstream model.",
+        description=(
+            "Start a new stateful conversation. "
+            "Use when you need follow-up turns to share context across "
+            "multiple calls."
+        ),
     )
     async def conversation_start(message: str) -> ConversationStartResult:
         try:
@@ -258,7 +264,10 @@ def create_server(
 
     @mcp.tool(
         name="conversation_continue",
-        description="Continue an existing multi-round conversation.",
+        description=(
+            "Continue a previously started stateful conversation by ID. "
+            "Use after conversation_start to keep context."
+        ),
     )
     async def conversation_continue(
         conversation_id: str,
@@ -310,7 +319,11 @@ def create_server(
 
     @mcp.tool(
         name="conversation_get",
-        description="Inspect the stored state of an existing conversation.",
+        description=(
+            "Inspect the stored state of a conversation by ID. "
+            "Use when you need to recover context without asking a new "
+            "question."
+        ),
     )
     async def conversation_get(conversation_id: str) -> ConversationGetResult:
         try:
@@ -354,7 +367,10 @@ def create_server(
 
     @mcp.tool(
         name="extract_url",
-        description="Extract the main content from a URL through the upstream model.",
+        description=(
+            "Extract and clean the main content from a URL. "
+            "Use for full-page reading, not for search or site discovery."
+        ),
     )
     async def extract_url(
         url: str,
@@ -399,7 +415,11 @@ def create_server(
 
     @mcp.tool(
         name="outline_url",
-        description="Return a structured outline of a URL or llms.txt-like index.",
+        description=(
+            "Summarize a URL or llms.txt-like index into a structured "
+            "outline. Use to inspect site structure before reading pages in "
+            "detail."
+        ),
     )
     async def outline_url(
         url: str,
@@ -437,7 +457,11 @@ def create_server(
 
     @mcp.tool(
         name="docs_qa",
-        description="Answer a documentation question using official online docs.",
+        description=(
+            "Answer a question from official documentation, optionally scoped "
+            "to a specific docs URL. Use when you want a docs-grounded answer "
+            "instead of broad web search."
+        ),
     )
     async def docs_qa(
         question: str,
@@ -486,7 +510,11 @@ def create_server(
 
     @mcp.tool(
         name="find_official_docs",
-        description="Find official documentation entry points for a topic or library.",
+        description=(
+            "Find canonical documentation entry points for a topic or "
+            "library. Use when you need the official source before asking a "
+            "question."
+        ),
     )
     async def find_official_docs(
         query: str, max_results: int = 5
@@ -524,8 +552,8 @@ def create_server(
     @mcp.tool(
         name="resolve_doc_source",
         description=(
-            "Classify whether input is a page URL, llms.txt, docs query, "
-            "or web search query."
+            "Classify an input as a page URL, llms.txt, docs question, or "
+            "web search query. Use to route the request to the right tool."
         ),
     )
     async def resolve_doc_source(query_or_url: str) -> DocSourceResolutionResult:
