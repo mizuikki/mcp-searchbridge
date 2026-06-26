@@ -1,21 +1,22 @@
 from __future__ import annotations
 
-import os
 import json
+import os
 import shutil
 import subprocess
+import textwrap
 import time
 import uuid
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from threading import Lock, Thread
 
 import httpx
 import pytest
 
-from tests.helpers import REPO_ROOT, SEARCHBRIDGE_CORE_ROOT, find_free_port
+from tests.helpers import REPO_ROOT, SEARCHBRIDGE_CORE_ROOT, find_free_port, host_port
 
 PRIVATE_TOKEN = "compose-secret-token"
 COMPOSE_SERVICES = (
@@ -211,7 +212,7 @@ class _FetchFixtureHandler(BaseHTTPRequestHandler):
 
 
 @contextmanager
-def run_fetch_fixture_server() -> tuple[str, _FetchFixtureState]:
+def run_fetch_fixture_server() -> Iterator[tuple[str, _FetchFixtureState]]:
     state = _FetchFixtureState()
 
     class Handler(_FetchFixtureHandler):
@@ -222,7 +223,7 @@ def run_fetch_fixture_server() -> tuple[str, _FetchFixtureState]:
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        _host, port = server.server_address
+        _host, port = host_port(server.server_address)
         yield (f"http://127.0.0.1:{port}", state)
     finally:
         server.shutdown()
@@ -436,10 +437,11 @@ def test_compose_topology_builds_from_workspace_sources_and_serves_db_backed_api
                             "content": (
                                 "# Compose Intro\n\n"
                                 "## Overview\n\n"
-                                "Compose verification stores normalized content in Postgres "
-                                "metadata and blob storage.\n\n"
+                                "Compose verification stores normalized content "
+                                "in Postgres metadata and blob storage.\n\n"
                                 "## Details\n\n"
-                                "Worker jobs are executed through the Postgres task table.\n"
+                                "Worker jobs are executed through the Postgres "
+                                "task table.\n"
                             ),
                             "content_format": "markdown",
                             "outline": [
@@ -496,7 +498,10 @@ def test_compose_topology_builds_from_workspace_sources_and_serves_db_backed_api
             with fixture_state.lock:
                 assert fixture_state.embedding_request_count >= 2
                 assert fixture_state.last_embedding_request is not None
-                assert fixture_state.last_embedding_request["model"] == "text-embedding-3-small"
+                assert (
+                    fixture_state.last_embedding_request["model"]
+                    == "text-embedding-3-small"
+                )
                 assert fixture_state.last_embedding_request["dimensions"] == 16
                 fixture_state.embedding_mode = "error"
 
@@ -506,30 +511,46 @@ def test_compose_topology_builds_from_workspace_sources_and_serves_db_backed_api
                 "run",
                 "python",
                 "-c",
-                (
-                    "from mcp_searchbridge.config import Settings;"
-                    "from mcp_searchbridge.private_backend import PrivateHttpAggregationBackend;"
-                    "from mcp_searchbridge.models import DocsQARequest;"
-                    "settings = Settings();"
-                    "backend = PrivateHttpAggregationBackend(settings);"
-                    "result = backend.docs_qa(DocsQARequest("
-                    "question='How are worker jobs executed?',"
-                    "url='https://compose.test/docs/intro',"
-                    "domain_allowlist=['compose.test'],"
-                    "answer_mode='standard'"
-                    "));"
-                    "print(result.diagnostics.backend_kind);"
-                    "print(result.diagnostics.source_id);"
-                    "print(result.answer)"
+                textwrap.dedent(
+                    """\
+                    import asyncio
+                    from mcp_searchbridge.config import Settings
+                    from mcp_searchbridge.private_backend import (
+                        PrivateHttpAggregationBackend,
+                    )
+                    from mcp_searchbridge.models import DocsQARequest
+
+                    async def main():
+                        backend = PrivateHttpAggregationBackend(Settings())
+                        try:
+                            result = await backend.docs_qa(DocsQARequest(
+                                question='How are worker jobs executed?',
+                                url='https://compose.test/docs/intro',
+                                domain_allowlist=['compose.test'],
+                                answer_mode='standard',
+                            ))
+                            print(result.diagnostics.backend_kind)
+                            print(result.diagnostics.source_id)
+                            print(result.answer)
+                        finally:
+                            await backend.aclose()
+
+                    asyncio.run(main())
+                    """
                 ),
                 env=env,
             )
             facade_lines = [
-                line.strip() for line in facade_check.stdout.splitlines() if line.strip()
+                line.strip()
+                for line in facade_check.stdout.splitlines()
+                if line.strip()
             ]
             assert facade_lines[0] == "private_http"
             assert facade_lines[1] == seeded["source_id"]
-            assert "Worker jobs are executed through the Postgres task table." in facade_lines[-1]
+            assert (
+                "Worker jobs are executed through the Postgres task table."
+                in facade_lines[-1]
+            )
 
             trigger_response = httpx.post(
                 f"{base_url}/internal/v1/index_rebuild",
@@ -566,8 +587,14 @@ def test_compose_topology_builds_from_workspace_sources_and_serves_db_backed_api
             assert docs_fallback["diagnostics"]["source_id"] == seeded["source_id"]
             assert docs_fallback["diagnostics"]["selected_document_ids"]
             assert docs_fallback["diagnostics"]["selected_chunk_ids"]
-            assert docs_fallback["diagnostics"]["retrieval_method"] == "pg_fts_pgvector_hybrid"
-            assert "Worker jobs are executed through the Postgres task table." in docs_fallback["answer"]
+            assert (
+                docs_fallback["diagnostics"]["retrieval_method"]
+                == "pg_fts_pgvector_hybrid"
+            )
+            assert (
+                "Worker jobs are executed through the Postgres task table."
+                in docs_fallback["answer"]
+            )
 
             cached_doc_url = _host_docker_url(fixture_base_url, "/cached-doc")
             fresh_fetch = httpx.post(
@@ -621,7 +648,10 @@ def test_compose_topology_builds_from_workspace_sources_and_serves_db_backed_api
             revalidated_fetch.raise_for_status()
             revalidated_payload = revalidated_fetch.json()
             assert revalidated_payload["content"] == fresh_payload["content"]
-            assert revalidated_payload["diagnostics"]["retrieval_method"] == "registry_blob"
+            assert (
+                revalidated_payload["diagnostics"]["retrieval_method"]
+                == "registry_blob"
+            )
 
             dedup_doc_url = _host_docker_url(fixture_base_url, "/dedup-doc")
 
@@ -644,8 +674,14 @@ def test_compose_topology_builds_from_workspace_sources_and_serves_db_backed_api
 
             dedup_first.raise_for_status()
             dedup_second.raise_for_status()
-            assert "Concurrent compose fetches should collapse" in dedup_first.json()["content"]
-            assert "Concurrent compose fetches should collapse" in dedup_second.json()["content"]
+            assert (
+                "Concurrent compose fetches should collapse"
+                in dedup_first.json()["content"]
+            )
+            assert (
+                "Concurrent compose fetches should collapse"
+                in dedup_second.json()["content"]
+            )
             with fixture_state.lock:
                 assert fixture_state.dedup_request_count == 1
 

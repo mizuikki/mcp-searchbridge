@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
 import logging
 import random
 import re
 import threading
-import time
+from collections.abc import Awaitable
 from dataclasses import dataclass
 from typing import Any, Protocol, cast
 from urllib.parse import urlparse
 
 import openai
-from openai import OpenAI
+from openai import AsyncOpenAI
 from openai.types.chat import (
     ChatCompletion,
     ChatCompletionMessageParam,
@@ -106,7 +108,7 @@ class ChatCompletionsClient(Protocol):
         model: str,
         messages: list[ChatCompletionMessageParam],
         response_format: ResponseFormatJSONObject | None = None,
-    ) -> ChatCompletion: ...
+    ) -> ChatCompletion | Awaitable[ChatCompletion]: ...
 
 
 class ChatNamespace(Protocol):
@@ -138,7 +140,7 @@ class OpenAIAggregationBackend:
         self.settings = settings
         self.provider_model = settings.resolved_openai_model
         self.provider_models = settings.resolved_openai_models
-        self.client = client or OpenAI(
+        self.client = client or AsyncOpenAI(
             api_key=settings.resolved_openai_api_key,
             base_url=str(settings.resolved_openai_base_url),
             organization=settings.openai_organization,
@@ -147,12 +149,10 @@ class OpenAIAggregationBackend:
             max_retries=settings.openai_max_retries,
         )
 
-    def search_web(self, request: SearchRequest) -> SearchResult:
+    async def search_web(self, request: SearchRequest) -> SearchResult:
         """Call the upstream provider for search/discovery."""
 
-        outcome = self._call_json_tool(
-            build_search_user_prompt(request)
-        )
+        outcome = await self._call_json_tool(build_search_user_prompt(request))
         result = parse_search_response(
             content=outcome.content,
             request=request,
@@ -165,12 +165,10 @@ class OpenAIAggregationBackend:
         _append_tool_call_metadata(result.diagnostics, outcome)
         return result
 
-    def extract_url(self, request: ExtractUrlRequest) -> ExtractResult:
+    async def extract_url(self, request: ExtractUrlRequest) -> ExtractResult:
         """Call the upstream provider for URL extraction."""
 
-        outcome = self._call_json_tool(
-            build_extract_user_prompt(request)
-        )
+        outcome = await self._call_json_tool(build_extract_user_prompt(request))
         payload = _extract_json_payload(outcome.content)
         title = _safe_text(payload.get("title", "")) if payload else ""
         url = (
@@ -215,12 +213,10 @@ class OpenAIAggregationBackend:
         _set_tool_call_metadata(result.diagnostics, outcome)
         return result
 
-    def outline_url(self, request: OutlineUrlRequest) -> OutlineResult:
+    async def outline_url(self, request: OutlineUrlRequest) -> OutlineResult:
         """Call the upstream provider for URL outline generation."""
 
-        outcome = self._call_json_tool(
-            build_outline_user_prompt(request)
-        )
+        outcome = await self._call_json_tool(build_outline_user_prompt(request))
         body = outcome.content
         payload = _extract_json_payload(outcome.content)
         sections_payload = payload.get("sections", []) if payload else []
@@ -261,12 +257,10 @@ class OpenAIAggregationBackend:
         _set_tool_call_metadata(result.diagnostics, outcome)
         return result
 
-    def docs_qa(self, request: DocsQARequest) -> DocsQAResult:
+    async def docs_qa(self, request: DocsQARequest) -> DocsQAResult:
         """Call the upstream provider for docs question answering."""
 
-        outcome = self._call_json_tool(
-            build_docs_qa_user_prompt(request)
-        )
+        outcome = await self._call_json_tool(build_docs_qa_user_prompt(request))
         payload = _extract_json_payload(outcome.content)
         sources = _parse_sources_from_payload(
             payload=payload,
@@ -285,9 +279,7 @@ class OpenAIAggregationBackend:
                 answer_mode=request.answer_mode,
             ),
             answer=(
-                _safe_text(payload.get("answer", ""))
-                if payload
-                else outcome.content
+                _safe_text(payload.get("answer", "")) if payload else outcome.content
             ),
             citations=citations,
             sources=sources,
@@ -301,13 +293,13 @@ class OpenAIAggregationBackend:
         _set_tool_call_metadata(result.diagnostics, outcome)
         return result
 
-    def find_official_docs(
+    async def find_official_docs(
         self,
         request: FindOfficialDocsRequest,
     ) -> OfficialDocsResult:
         """Call the upstream provider for official docs discovery."""
 
-        outcome = self._call_json_tool(
+        outcome = await self._call_json_tool(
             build_find_official_docs_user_prompt(request)
         )
         payload = _extract_json_payload(outcome.content)
@@ -349,13 +341,13 @@ class OpenAIAggregationBackend:
         _set_tool_call_metadata(result.diagnostics, outcome)
         return result
 
-    def resolve_doc_source(
+    async def resolve_doc_source(
         self,
         request: DocSourceResolutionRequest,
     ) -> DocSourceResolutionResult:
         """Call the upstream provider for source resolution."""
 
-        outcome = self._call_json_tool(
+        outcome = await self._call_json_tool(
             build_resolve_doc_source_user_prompt(request)
         )
         payload = _extract_json_payload(outcome.content)
@@ -391,7 +383,7 @@ class OpenAIAggregationBackend:
         _set_tool_call_metadata(result.diagnostics, outcome)
         return result
 
-    def _call_json_tool(self, user_prompt: str) -> ToolCallOutcome:
+    async def _call_json_tool(self, user_prompt: str) -> ToolCallOutcome:
         messages: list[ChatCompletionMessageParam] = [
             ChatCompletionSystemMessageParam(
                 role="system",
@@ -407,11 +399,13 @@ class OpenAIAggregationBackend:
         for model_name in self.provider_models:
             attempted_models.append(model_name)
             try:
-                content, response_format_accepted, warning_codes = (
-                    self._call_model_json_tool(
+                (
+                    content,
+                    response_format_accepted,
+                    warning_codes,
+                ) = await self._call_model_json_tool(
                     messages=messages,
                     model_name=model_name,
-                    )
                 )
                 return ToolCallOutcome(
                     content=content,
@@ -449,7 +443,7 @@ class OpenAIAggregationBackend:
             )
         raise RuntimeError("OpenAI model chain exhausted without returning or raising")
 
-    def _call_model_json_tool(
+    async def _call_model_json_tool(
         self,
         *,
         messages: list[ChatCompletionMessageParam],
@@ -463,15 +457,17 @@ class OpenAIAggregationBackend:
         while attempts_remaining > 0:
             try:
                 if structured_output_supported:
-                    response = self.client.chat.completions.create(
-                        model=model_name,
-                        messages=messages,
-                        response_format=STRUCTURED_RESPONSE_FORMAT,
+                    response = await _maybe_await(
+                        self.client.chat.completions.create(
+                            model=model_name,
+                            messages=messages,
+                            response_format=STRUCTURED_RESPONSE_FORMAT,
+                        )
                     )
                 else:
                     response_format_accepted = False
                     warning_codes.append("structured_output_not_supported")
-                    response = self._fallback_completion(
+                    response = await self._fallback_completion(
                         messages,
                         model_name=model_name,
                     )
@@ -496,7 +492,7 @@ class OpenAIAggregationBackend:
                     attempts_remaining,
                     delay_seconds,
                 )
-                time.sleep(delay_seconds)
+                await asyncio.sleep(delay_seconds)
             except openai.BadRequestError as exc:
                 if not _is_structured_output_unsupported_error(exc):
                     raise _build_upstream_error(exc) from exc
@@ -525,16 +521,18 @@ class OpenAIAggregationBackend:
 
         raise RuntimeError("OpenAI retry loop exhausted without returning or raising")
 
-    def _fallback_completion(
+    async def _fallback_completion(
         self,
         messages: list[ChatCompletionMessageParam],
         *,
         model_name: str,
     ) -> str:
         try:
-            response = self.client.chat.completions.create(
-                model=model_name,
-                messages=messages,
+            response = await _maybe_await(
+                self.client.chat.completions.create(
+                    model=model_name,
+                    messages=messages,
+                )
             )
             return _message_content(response)
         except (
@@ -547,6 +545,11 @@ class OpenAIAggregationBackend:
             raise _build_upstream_error(exc) from exc
         except openai.OpenAIError as exc:
             raise _build_upstream_error(exc) from exc
+
+    async def aclose(self) -> None:
+        close = getattr(self.client, "close", None)
+        if callable(close):
+            await _maybe_await(close())
 
     def _provider_info(self, model_name: str | None = None) -> ProviderInfo:
         return ProviderInfo(
@@ -561,6 +564,12 @@ class OpenAIAggregationBackend:
 
     def _structured_output_cache_key(self, model_name: str) -> tuple[str, str]:
         return (str(self.settings.resolved_openai_base_url), model_name)
+
+
+async def _maybe_await[ResultT](value: ResultT | Awaitable[ResultT]) -> ResultT:
+    if inspect.isawaitable(value):
+        return await cast(Awaitable[ResultT], value)
+    return value
 
 
 def _message_content(response: Any) -> str:

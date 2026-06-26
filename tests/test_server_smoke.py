@@ -235,6 +235,43 @@ class FakeBackend:
         )
 
 
+class AsyncCoordinatedBackend:
+    provider_name = FakeBackend.provider_name
+    provider_model = FakeBackend.provider_model
+    backend_kind = FakeBackend.backend_kind
+
+    def __init__(self) -> None:
+        self.backend = FakeBackend()
+        self.entered_calls = 0
+        self.both_calls_entered = asyncio.Event()
+        self.release_calls = asyncio.Event()
+
+    async def search_web(self, request: SearchRequest) -> SearchResult:
+        self.entered_calls += 1
+        if self.entered_calls == 2:
+            self.both_calls_entered.set()
+        await self.release_calls.wait()
+        return self.backend.search_web(request)
+
+    def extract_url(self, request: ExtractUrlRequest) -> ExtractResult:
+        return self.backend.extract_url(request)
+
+    def outline_url(self, request: OutlineUrlRequest) -> OutlineResult:
+        return self.backend.outline_url(request)
+
+    def docs_qa(self, request: DocsQARequest) -> DocsQAResult:
+        return self.backend.docs_qa(request)
+
+    def find_official_docs(self, request: Any) -> OfficialDocsResult:
+        return self.backend.find_official_docs(request)
+
+    def resolve_doc_source(
+        self,
+        request: DocSourceResolutionRequest,
+    ) -> DocSourceResolutionResult:
+        return self.backend.resolve_doc_source(request)
+
+
 class FailingBackend(FakeBackend):
     def __init__(self, exc: UpstreamSearchError) -> None:
         super().__init__()
@@ -279,6 +316,33 @@ def test_create_server_registers_tools() -> None:
         "find_official_docs",
         "resolve_doc_source",
     }
+
+
+def test_search_tool_calls_can_overlap() -> None:
+    settings = make_settings(OPENAI_MODEL="fake-model")
+    backend = AsyncCoordinatedBackend()
+    server = create_server(settings=settings, backend=backend)
+
+    async def run_calls() -> None:
+        calls = [
+            asyncio.create_task(
+                server._tool_manager.call_tool(
+                    "search_web",
+                    {"query": f"parallel request {index}"},
+                )
+            )
+            for index in range(2)
+        ]
+        await asyncio.wait_for(backend.both_calls_entered.wait(), timeout=1)
+        assert backend.entered_calls == 2
+        backend.release_calls.set()
+        results = await asyncio.gather(*calls)
+        assert [result.query.text for result in results] == [
+            "parallel request 0",
+            "parallel request 1",
+        ]
+
+    asyncio.run(run_calls())
 
 
 def test_server_returns_sanitized_upstream_errors_for_all_tools(

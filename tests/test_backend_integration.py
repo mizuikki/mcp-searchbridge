@@ -20,6 +20,8 @@ from mcp_searchbridge.models import (
 from mcp_searchbridge.openai_backend import ChatNamespace, OpenAIAggregationBackend
 from tests.helpers import host_port, make_settings, url
 
+pytestmark = pytest.mark.asyncio
+
 
 class _ChatCompletionsHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
@@ -440,7 +442,11 @@ class _FencedJsonStringClient:
         self.chat = cast(ChatNamespace, _ChatNamespaceImpl(content))
 
 
-def test_backend_search_against_fake_openai_endpoint() -> None:
+async def _record_sleep(seconds: float, calls: list[float]) -> None:
+    calls.append(seconds)
+
+
+async def test_backend_search_against_fake_openai_endpoint() -> None:
     server = ThreadingHTTPServer(("127.0.0.1", 0), _ChatCompletionsHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -453,7 +459,7 @@ def test_backend_search_against_fake_openai_endpoint() -> None:
         )
         backend = OpenAIAggregationBackend(settings)
 
-        result = backend.search_web(
+        result = await backend.search_web(
             SearchRequest(
                 query="latest status",
                 recency="latest",
@@ -475,7 +481,7 @@ def test_backend_search_against_fake_openai_endpoint() -> None:
         server.server_close()
 
 
-def test_backend_extract_against_fake_openai_endpoint() -> None:
+async def test_backend_extract_against_fake_openai_endpoint() -> None:
     server = ThreadingHTTPServer(("127.0.0.1", 0), _ChatCompletionsHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -488,7 +494,7 @@ def test_backend_extract_against_fake_openai_endpoint() -> None:
         )
         backend = OpenAIAggregationBackend(settings)
 
-        result = backend.extract_url(
+        result = await backend.extract_url(
             ExtractUrlRequest(
                 url=url("https://example.com/page"),
                 mode="best_effort",
@@ -506,7 +512,7 @@ def test_backend_extract_against_fake_openai_endpoint() -> None:
         server.server_close()
 
 
-def test_backend_falls_back_when_structured_output_is_rejected() -> None:
+async def test_backend_falls_back_when_structured_output_is_rejected() -> None:
     _FallbackChatCompletionsHandler.request_count = 0
     server = ThreadingHTTPServer(("127.0.0.1", 0), _FallbackChatCompletionsHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -520,7 +526,7 @@ def test_backend_falls_back_when_structured_output_is_rejected() -> None:
         )
         backend = OpenAIAggregationBackend(settings)
 
-        result = backend.search_web(SearchRequest(query="fallback test"))
+        result = await backend.search_web(SearchRequest(query="fallback test"))
 
         assert result.summary.text == "Fallback answer"
         assert len(result.sources) == 1
@@ -534,7 +540,7 @@ def test_backend_falls_back_when_structured_output_is_rejected() -> None:
         server.server_close()
 
 
-def test_backend_skips_structured_output_after_capability_is_cached() -> None:
+async def test_backend_skips_structured_output_after_capability_is_cached() -> None:
     _FallbackChatCompletionsHandler.request_count = 0
     server = ThreadingHTTPServer(("127.0.0.1", 0), _FallbackChatCompletionsHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -548,8 +554,8 @@ def test_backend_skips_structured_output_after_capability_is_cached() -> None:
         )
         backend = OpenAIAggregationBackend(settings)
 
-        first = backend.search_web(SearchRequest(query="first fallback test"))
-        second = backend.search_web(SearchRequest(query="second fallback test"))
+        first = await backend.search_web(SearchRequest(query="first fallback test"))
+        second = await backend.search_web(SearchRequest(query="second fallback test"))
 
         assert first.summary.text == "Fallback answer"
         assert second.summary.text == "Fallback answer"
@@ -561,7 +567,7 @@ def test_backend_skips_structured_output_after_capability_is_cached() -> None:
         server.server_close()
 
 
-def test_backend_does_not_fallback_for_unrelated_bad_request() -> None:
+async def test_backend_does_not_fallback_for_unrelated_bad_request() -> None:
     _GenericBadRequestHandler.request_count = 0
     server = ThreadingHTTPServer(("127.0.0.1", 0), _GenericBadRequestHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -576,7 +582,7 @@ def test_backend_does_not_fallback_for_unrelated_bad_request() -> None:
         backend = OpenAIAggregationBackend(settings)
 
         with pytest.raises(UpstreamSearchError) as exc_info:
-            backend.search_web(SearchRequest(query="bad request test"))
+            await backend.search_web(SearchRequest(query="bad request test"))
 
         exc = exc_info.value
         assert exc.client_message == "The upstream provider rejected the request."
@@ -591,7 +597,7 @@ def test_backend_does_not_fallback_for_unrelated_bad_request() -> None:
         server.server_close()
 
 
-def test_backend_falls_back_to_next_model_on_retryable_error() -> None:
+async def test_backend_falls_back_to_next_model_on_retryable_error() -> None:
     _ModelFallbackHandler.attempted_models = []
     server = ThreadingHTTPServer(("127.0.0.1", 0), _ModelFallbackHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -606,7 +612,7 @@ def test_backend_falls_back_to_next_model_on_retryable_error() -> None:
         )
         backend = OpenAIAggregationBackend(settings)
 
-        result = backend.search_web(SearchRequest(query="fallback model test"))
+        result = await backend.search_web(SearchRequest(query="fallback model test"))
 
         assert result.summary.text == "Recovered via fallback model"
         assert result.diagnostics.provider.model == "fallback-model"
@@ -627,7 +633,7 @@ def test_backend_falls_back_to_next_model_on_retryable_error() -> None:
         server.server_close()
 
 
-def test_backend_connection_errors_are_sanitized() -> None:
+async def test_backend_connection_errors_are_sanitized() -> None:
     class _FailingChatCompletions:
         def create(self, **_: object) -> object:
             request = httpx.Request(
@@ -653,7 +659,7 @@ def test_backend_connection_errors_are_sanitized() -> None:
     backend = OpenAIAggregationBackend(settings, client=_FailingClient())
 
     with pytest.raises(UpstreamSearchError) as exc_info:
-        backend.search_web(SearchRequest(query="connection test"))
+        await backend.search_web(SearchRequest(query="connection test"))
 
     exc = exc_info.value
     assert exc.client_message == "Could not connect to the upstream provider."
@@ -664,7 +670,7 @@ def test_backend_connection_errors_are_sanitized() -> None:
     assert "http://" not in exc.client_message
 
 
-def test_backend_retries_empty_string_responses(
+async def test_backend_retries_empty_string_responses(
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -690,13 +696,13 @@ def test_backend_retries_empty_string_responses(
             lambda: 0.0,
         )
         monkeypatch.setattr(
-            openai_backend_module.time,
+            openai_backend_module.asyncio,
             "sleep",
-            lambda seconds: sleep_calls.append(seconds),
+            lambda seconds: _record_sleep(seconds, sleep_calls),
         )
         caplog.set_level(logging.WARNING)
 
-        result = backend.search_web(SearchRequest(query="retry empty string"))
+        result = await backend.search_web(SearchRequest(query="retry empty string"))
 
         assert result.summary.text == "Recovered after retry"
         assert str(result.sources[0].url) == "https://example.com/recovered"
@@ -708,7 +714,7 @@ def test_backend_retries_empty_string_responses(
         server.server_close()
 
 
-def test_backend_retries_empty_message_content_until_exhausted(
+async def test_backend_retries_empty_message_content_until_exhausted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _RetryingEmptyContentHandler.request_count = 0
@@ -733,13 +739,13 @@ def test_backend_retries_empty_message_content_until_exhausted(
             lambda: 0.0,
         )
         monkeypatch.setattr(
-            openai_backend_module.time,
+            openai_backend_module.asyncio,
             "sleep",
-            lambda seconds: sleep_calls.append(seconds),
+            lambda seconds: _record_sleep(seconds, sleep_calls),
         )
 
         with pytest.raises(UpstreamSearchError) as exc_info:
-            backend.search_web(SearchRequest(query="retry empty message"))
+            await backend.search_web(SearchRequest(query="retry empty message"))
 
         exc = exc_info.value
         assert exc.client_message == "Upstream response message content was empty."
@@ -753,7 +759,7 @@ def test_backend_retries_empty_message_content_until_exhausted(
         server.server_close()
 
 
-def test_backend_uses_exponential_backoff_for_multiple_empty_response_retries(
+async def test_backend_uses_exponential_backoff_for_multiple_empty_response_retries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _RetryingEmptyContentHandler.request_count = 0
@@ -778,12 +784,14 @@ def test_backend_uses_exponential_backoff_for_multiple_empty_response_retries(
             lambda: 0.0,
         )
         monkeypatch.setattr(
-            openai_backend_module.time,
+            openai_backend_module.asyncio,
             "sleep",
-            lambda seconds: sleep_calls.append(seconds),
+            lambda seconds: _record_sleep(seconds, sleep_calls),
         )
 
-        result = backend.search_web(SearchRequest(query="retry twice before success"))
+        result = await backend.search_web(
+            SearchRequest(query="retry twice before success")
+        )
 
         assert result.summary.text == "Recovered after retry"
         assert _RetryingEmptyContentHandler.request_count == 3
@@ -793,7 +801,7 @@ def test_backend_uses_exponential_backoff_for_multiple_empty_response_retries(
         server.server_close()
 
 
-def test_find_official_docs_parses_fenced_json_from_sse_string_response() -> None:
+async def test_find_official_docs_parses_fenced_json_from_sse_string_response() -> None:
     response = (
         'data: {"id":"chatcmpl-test","object":"chat.completion.chunk","created":1,'
         '"model":"fake-search-model","choices":[{"index":0,"delta":{"role":'
@@ -814,7 +822,7 @@ def test_find_official_docs_parses_fenced_json_from_sse_string_response() -> Non
         client=_FencedJsonStringClient(response),
     )
 
-    result = backend.find_official_docs(
+    result = await backend.find_official_docs(
         FindOfficialDocsRequest(
             query="Notion official docs databases relations rollups linked views",
             max_results=5,
@@ -830,7 +838,7 @@ def test_find_official_docs_parses_fenced_json_from_sse_string_response() -> Non
     assert result.diagnostics.status == "ok"
 
 
-def test_find_official_docs_logs_non_stream_request_receiving_sse(
+async def test_find_official_docs_logs_non_stream_request_receiving_sse(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     response = (
@@ -852,7 +860,7 @@ def test_find_official_docs_logs_non_stream_request_receiving_sse(
     )
     caplog.set_level(logging.WARNING)
 
-    result = backend.find_official_docs(
+    result = await backend.find_official_docs(
         FindOfficialDocsRequest(query="official docs", max_results=1)
     )
 
@@ -863,7 +871,7 @@ def test_find_official_docs_logs_non_stream_request_receiving_sse(
     )
 
 
-def test_backend_marks_404_like_pages_as_empty_or_partial() -> None:
+async def test_backend_marks_404_like_pages_as_empty_or_partial() -> None:
     server = ThreadingHTTPServer(("127.0.0.1", 0), _NotFoundExtractionHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -876,7 +884,7 @@ def test_backend_marks_404_like_pages_as_empty_or_partial() -> None:
         )
         backend = OpenAIAggregationBackend(settings)
 
-        extract_result = backend.extract_url(
+        extract_result = await backend.extract_url(
             ExtractUrlRequest(
                 url=url("https://pydantic.dev/this-page-should-not-exist"),
                 mode="best_effort",
@@ -895,7 +903,7 @@ def test_backend_marks_404_like_pages_as_empty_or_partial() -> None:
         server.server_close()
 
 
-def test_backend_normalizes_404_warning_aliases() -> None:
+async def test_backend_normalizes_404_warning_aliases() -> None:
     server = ThreadingHTTPServer(("127.0.0.1", 0), _NotFoundWarningAliasHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -908,7 +916,7 @@ def test_backend_normalizes_404_warning_aliases() -> None:
         )
         backend = OpenAIAggregationBackend(settings)
 
-        result = backend.extract_url(
+        result = await backend.extract_url(
             ExtractUrlRequest(
                 url=url("https://example.com/missing"),
                 mode="best_effort",

@@ -24,6 +24,8 @@ from mcp_searchbridge.models import (
 from mcp_searchbridge.private_backend import PrivateHttpAggregationBackend
 from tests.helpers import host_port, make_settings, url
 
+pytestmark = pytest.mark.asyncio
+
 
 class _PrivateSearchHandler(BaseHTTPRequestHandler):
     last_path = ""
@@ -239,8 +241,9 @@ def _make_private_settings(port: int, **overrides: object):
     )
 
 
-def test_private_backend_posts_to_expected_endpoint_and_maps_response() -> None:
+async def test_private_backend_posts_to_expected_endpoint_and_maps_response() -> None:
     server, _thread = _start_server(_PrivateSearchHandler)
+    backend: PrivateHttpAggregationBackend | None = None
 
     try:
         _host, port = host_port(server.server_address)
@@ -254,7 +257,7 @@ def test_private_backend_posts_to_expected_endpoint_and_maps_response() -> None:
         assert isinstance(backend.client.timeout, httpx.Timeout)
         assert backend.client.timeout.read == 12
 
-        result = backend.search_web(
+        result = await backend.search_web(
             SearchRequest(
                 query="private search",
                 recency="latest",
@@ -278,20 +281,22 @@ def test_private_backend_posts_to_expected_endpoint_and_maps_response() -> None:
         assert result.diagnostics.backend_kind == "private_http"
         assert result.diagnostics.capabilities_used == ["private_http", "ranking"]
     finally:
-        backend.client.close()
+        if backend is not None:
+            await backend.aclose()
         server.shutdown()
         server.server_close()
 
 
-def test_private_backend_preserves_structured_error_body() -> None:
+async def test_private_backend_preserves_structured_error_body() -> None:
     server, _thread = _start_server(_StructuredPrivateErrorHandler)
+    backend: PrivateHttpAggregationBackend | None = None
 
     try:
         _host, port = host_port(server.server_address)
         backend = PrivateHttpAggregationBackend(_make_private_settings(port))
 
         with pytest.raises(UpstreamSearchError) as exc_info:
-            backend.search_web(SearchRequest(query="private search"))
+            await backend.search_web(SearchRequest(query="private search"))
 
         exc = exc_info.value
         assert exc.client_message == "Private backend upstream failed."
@@ -301,12 +306,13 @@ def test_private_backend_preserves_structured_error_body() -> None:
         assert exc.log_context.status_code == 502
         assert exc.log_context.error_type == "PrivateBackendErrorResponse"
     finally:
-        backend.client.close()
+        if backend is not None:
+            await backend.aclose()
         server.shutdown()
         server.server_close()
 
 
-def test_private_backend_does_not_fallback_on_auth_error() -> None:
+async def test_private_backend_does_not_fallback_on_auth_error() -> None:
     class _AuthErrorHandler(_StructuredPrivateErrorHandler):
         status_code = 401
         error_body = {
@@ -333,17 +339,17 @@ def test_private_backend_does_not_fallback_on_auth_error() -> None:
         )
 
         with pytest.raises(UpstreamSearchError, match="Private backend auth failed."):
-            backend.search_web(SearchRequest(query="private search"))
+            await backend.search_web(SearchRequest(query="private search"))
 
         assert fallback_backend.calls == []
     finally:
         if backend is not None:
-            backend.client.close()
+            await backend.aclose()
         server.shutdown()
         server.server_close()
 
 
-def test_private_backend_does_not_fallback_on_invalid_json() -> None:
+async def test_private_backend_does_not_fallback_on_invalid_json() -> None:
     server, _thread = _start_server(_InvalidJsonHandler)
     backend: PrivateHttpAggregationBackend | None = None
 
@@ -363,19 +369,17 @@ def test_private_backend_does_not_fallback_on_invalid_json() -> None:
             UpstreamSearchError,
             match="Private backend returned invalid JSON.",
         ):
-            backend.search_web(SearchRequest(query="private search"))
+            await backend.search_web(SearchRequest(query="private search"))
 
         assert fallback_backend.calls == []
     finally:
         if backend is not None:
-            backend.client.close()
+            await backend.aclose()
         server.shutdown()
         server.server_close()
 
 
-def test_private_backend_does_not_fallback_on_response_model_validation_failure() -> (
-    None
-):
+async def test_private_backend_no_fallback_on_response_validation_failure() -> None:
     server, _thread = _start_server(_InvalidResponseDataHandler)
     backend: PrivateHttpAggregationBackend | None = None
 
@@ -395,7 +399,7 @@ def test_private_backend_does_not_fallback_on_response_model_validation_failure(
             UpstreamSearchError,
             match="Private backend returned invalid response data.",
         ) as exc_info:
-            backend.search_web(SearchRequest(query="private search"))
+            await backend.search_web(SearchRequest(query="private search"))
 
         exc = exc_info.value
         assert exc.error_code == "invalid_private_backend_response_data"
@@ -404,14 +408,12 @@ def test_private_backend_does_not_fallback_on_response_model_validation_failure(
         assert fallback_backend.calls == []
     finally:
         if backend is not None:
-            backend.client.close()
+            await backend.aclose()
         server.shutdown()
         server.server_close()
 
 
-def test_private_backend_incomplete_error_body_falls_back_to_generic_http_error() -> (
-    None
-):
+async def test_private_backend_incomplete_error_body_uses_generic_http_error() -> None:
     class _IncompleteStructuredErrorHandler(_StructuredPrivateErrorHandler):
         status_code = 502
         error_body = {
@@ -421,6 +423,7 @@ def test_private_backend_incomplete_error_body_falls_back_to_generic_http_error(
         }
 
     server, _thread = _start_server(_IncompleteStructuredErrorHandler)
+    backend: PrivateHttpAggregationBackend | None = None
 
     try:
         _host, port = host_port(server.server_address)
@@ -430,7 +433,7 @@ def test_private_backend_incomplete_error_body_falls_back_to_generic_http_error(
             UpstreamSearchError,
             match="Private backend returned HTTP 502.",
         ) as exc_info:
-            backend.search_web(SearchRequest(query="private search"))
+            await backend.search_web(SearchRequest(query="private search"))
 
         exc = exc_info.value
         assert exc.error_code is None
@@ -438,12 +441,13 @@ def test_private_backend_incomplete_error_body_falls_back_to_generic_http_error(
         assert exc.allow_fallback is False
         assert exc.log_context.error_type == "HTTPStatusError"
     finally:
-        backend.client.close()
+        if backend is not None:
+            await backend.aclose()
         server.shutdown()
         server.server_close()
 
 
-def test_private_backend_falls_back_on_retryable_5xx_transport_error() -> None:
+async def test_private_backend_falls_back_on_retryable_5xx_transport_error() -> None:
     server, _thread = _start_server(_StructuredPrivateErrorHandler)
     backend: PrivateHttpAggregationBackend | None = None
 
@@ -459,7 +463,7 @@ def test_private_backend_falls_back_on_retryable_5xx_transport_error() -> None:
             fallback_backend=fallback_backend,
         )
 
-        result = backend.search_web(SearchRequest(query="private search"))
+        result = await backend.search_web(SearchRequest(query="private search"))
 
         assert result.summary.text == "Fallback answer"
         assert len(fallback_backend.calls) == 1
@@ -467,12 +471,12 @@ def test_private_backend_falls_back_on_retryable_5xx_transport_error() -> None:
         assert result.diagnostics.backend_kind == "openai"
     finally:
         if backend is not None:
-            backend.client.close()
+            await backend.aclose()
         server.shutdown()
         server.server_close()
 
 
-def test_private_backend_falls_back_on_not_implemented_contract() -> None:
+async def test_private_backend_falls_back_on_not_implemented_contract() -> None:
     class _NotImplementedHandler(_StructuredPrivateErrorHandler):
         status_code = 400
         error_body = {
@@ -498,12 +502,12 @@ def test_private_backend_falls_back_on_not_implemented_contract() -> None:
             fallback_backend=fallback_backend,
         )
 
-        result = backend.search_web(SearchRequest(query="private search"))
+        result = await backend.search_web(SearchRequest(query="private search"))
 
         assert result.summary.text == "Fallback answer"
         assert len(fallback_backend.calls) == 1
     finally:
         if backend is not None:
-            backend.client.close()
+            await backend.aclose()
         server.shutdown()
         server.server_close()

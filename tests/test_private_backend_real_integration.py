@@ -131,7 +131,9 @@ def test_private_http_real_integration_happy_paths() -> None:
                 assert resolved is not None
                 assert resolved["diagnostics"]["backend_kind"] == "private_http"
                 assert resolved["source_type"] == "page_url"
-                assert resolved["diagnostics"]["retrieval_method"] == "registry_url_lookup"
+                assert (
+                    resolved["diagnostics"]["retrieval_method"] == "registry_url_lookup"
+                )
 
         asyncio.run(run_happy_paths())
 

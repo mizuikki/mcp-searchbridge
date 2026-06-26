@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
-from typing import Any, TypeVar
+from collections.abc import Awaitable
+from typing import Any, TypeVar, cast
 
 import httpx
 from pydantic import BaseModel, ValidationError
@@ -44,8 +46,8 @@ class PrivateHttpAggregationBackend:
         self,
         settings: Settings,
         *,
-        client: httpx.Client | None = None,
-        fallback_backend: OpenAIAggregationBackend | None = None,
+        client: httpx.AsyncClient | None = None,
+        fallback_backend: Any | None = None,
     ) -> None:
         self.settings = settings
         self.base_url = (
@@ -58,7 +60,7 @@ class PrivateHttpAggregationBackend:
             headers["Authorization"] = (
                 f"Bearer {settings.searchbridge_private_backend_api_key}"
             )
-        self.client = client or httpx.Client(
+        self.client = client or httpx.AsyncClient(
             base_url=self.base_url,
             headers=headers,
             timeout=settings.searchbridge_private_backend_timeout_seconds,
@@ -69,61 +71,61 @@ class PrivateHttpAggregationBackend:
             else None
         )
 
-    def search_web(self, request: SearchRequest) -> SearchResult:
-        return self._call_or_fallback(
+    async def search_web(self, request: SearchRequest) -> SearchResult:
+        return await self._call_or_fallback(
             "search_web",
             "v1/search_web",
             request,
             SearchResult,
         )
 
-    def extract_url(self, request: ExtractUrlRequest) -> ExtractResult:
-        return self._call_or_fallback(
+    async def extract_url(self, request: ExtractUrlRequest) -> ExtractResult:
+        return await self._call_or_fallback(
             "extract_url",
             "v1/extract_url",
             request,
             ExtractResult,
         )
 
-    def outline_url(self, request: OutlineUrlRequest) -> OutlineResult:
-        return self._call_or_fallback(
+    async def outline_url(self, request: OutlineUrlRequest) -> OutlineResult:
+        return await self._call_or_fallback(
             "outline_url",
             "v1/outline_url",
             request,
             OutlineResult,
         )
 
-    def docs_qa(self, request: DocsQARequest) -> DocsQAResult:
-        return self._call_or_fallback(
+    async def docs_qa(self, request: DocsQARequest) -> DocsQAResult:
+        return await self._call_or_fallback(
             "docs_qa",
             "v1/docs_qa",
             request,
             DocsQAResult,
         )
 
-    def find_official_docs(
+    async def find_official_docs(
         self,
         request: FindOfficialDocsRequest,
     ) -> OfficialDocsResult:
-        return self._call_or_fallback(
+        return await self._call_or_fallback(
             "find_official_docs",
             "v1/find_official_docs",
             request,
             OfficialDocsResult,
         )
 
-    def resolve_doc_source(
+    async def resolve_doc_source(
         self,
         request: DocSourceResolutionRequest,
     ) -> DocSourceResolutionResult:
-        return self._call_or_fallback(
+        return await self._call_or_fallback(
             "resolve_doc_source",
             "v1/resolve_doc_source",
             request,
             DocSourceResolutionResult,
         )
 
-    def _call_or_fallback(
+    async def _call_or_fallback(
         self,
         method_name: str,
         endpoint: str,
@@ -131,7 +133,7 @@ class PrivateHttpAggregationBackend:
         result_type: type[ResultT],
     ) -> ResultT:
         try:
-            return self._call_private(
+            return await self._call_private(
                 endpoint=endpoint,
                 request=request,
                 result_type=result_type,
@@ -151,9 +153,9 @@ class PrivateHttpAggregationBackend:
                 exc.error_code,
             )
             fallback_method = getattr(self.fallback_backend, method_name)
-            return fallback_method(request)
+            return await _maybe_await(fallback_method(request))
 
-    def _call_private(
+    async def _call_private(
         self,
         *,
         endpoint: str,
@@ -161,7 +163,9 @@ class PrivateHttpAggregationBackend:
         result_type: type[ResultT],
     ) -> ResultT:
         try:
-            response = self.client.post(endpoint, json=request.model_dump(mode="json"))
+            response = await _maybe_await(
+                self.client.post(endpoint, json=request.model_dump(mode="json"))
+            )
         except httpx.TimeoutException as exc:
             raise UpstreamSearchError(
                 "The private backend request timed out.",
@@ -222,6 +226,13 @@ class PrivateHttpAggregationBackend:
                 ),
                 error_code="invalid_private_backend_response_data",
             ) from exc
+
+    async def aclose(self) -> None:
+        close = getattr(self.client, "aclose", None) or getattr(
+            self.client, "close", None
+        )
+        if callable(close):
+            await _maybe_await(close())
 
     def _build_http_error(self, response: httpx.Response) -> UpstreamSearchError:
         error_payload = _extract_error_payload(response)
@@ -308,6 +319,14 @@ class PrivateHttpAggregationBackend:
 
         normalized["diagnostics"] = normalized_diagnostics
         return normalized
+
+
+async def _maybe_await[AwaitableResultT](
+    value: AwaitableResultT | Awaitable[AwaitableResultT],
+) -> AwaitableResultT:
+    if inspect.isawaitable(value):
+        return await cast(Awaitable[AwaitableResultT], value)
+    return value
 
 
 def _response_request_id(response: httpx.Response) -> str | None:

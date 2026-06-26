@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
-from typing import Protocol
+from collections.abc import Awaitable
+from contextlib import asynccontextmanager
+from typing import Protocol, cast
 
 from mcp.server.fastmcp import FastMCP
 from pydantic import ValidationError
@@ -52,21 +55,29 @@ LOGGER = logging.getLogger(__name__)
 class AggregationBackend(Protocol):
     provider_name: str
 
-    def search_web(self, request: SearchRequest) -> SearchResult: ...
+    def search_web(
+        self, request: SearchRequest
+    ) -> SearchResult | Awaitable[SearchResult]: ...
 
-    def extract_url(self, request: ExtractUrlRequest) -> ExtractResult: ...
+    def extract_url(
+        self, request: ExtractUrlRequest
+    ) -> ExtractResult | Awaitable[ExtractResult]: ...
 
-    def outline_url(self, request: OutlineUrlRequest) -> OutlineResult: ...
+    def outline_url(
+        self, request: OutlineUrlRequest
+    ) -> OutlineResult | Awaitable[OutlineResult]: ...
 
-    def docs_qa(self, request: DocsQARequest) -> DocsQAResult: ...
+    def docs_qa(
+        self, request: DocsQARequest
+    ) -> DocsQAResult | Awaitable[DocsQAResult]: ...
 
     def find_official_docs(
         self, request: FindOfficialDocsRequest
-    ) -> OfficialDocsResult: ...
+    ) -> OfficialDocsResult | Awaitable[OfficialDocsResult]: ...
 
     def resolve_doc_source(
         self, request: DocSourceResolutionRequest
-    ) -> DocSourceResolutionResult: ...
+    ) -> DocSourceResolutionResult | Awaitable[DocSourceResolutionResult]: ...
 
 
 def create_server(
@@ -79,6 +90,15 @@ def create_server(
     _configure_logging(active_settings.searchbridge_log_level)
     aggregation_backend = backend or build_backend(active_settings)
 
+    @asynccontextmanager
+    async def lifespan(_server: FastMCP):
+        try:
+            yield {}
+        finally:
+            close = getattr(aggregation_backend, "aclose", None)
+            if callable(close):
+                await _maybe_await(close())
+
     mcp = FastMCP(
         name="mcp-searchbridge",
         instructions=(
@@ -87,6 +107,7 @@ def create_server(
             "official docs, and classify documentation sources."
         ),
         log_level=active_settings.searchbridge_log_level,
+        lifespan=lifespan,
     )
 
     @mcp.tool(
@@ -95,7 +116,7 @@ def create_server(
             "Search the web through an upstream OpenAI-compatible chat provider."
         ),
     )
-    def search_web(
+    async def search_web(
         query: str,
         recency: str | None = None,
         max_sources: int | None = None,
@@ -114,7 +135,7 @@ def create_server(
                 domain_allowlist=domain_allowlist or [],
                 return_mode=return_mode,
             )
-            return aggregation_backend.search_web(request)
+            return await _maybe_await(aggregation_backend.search_web(request))
         except ValidationError as exc:
             LOGGER.error("search_web validation failed: %s", exc)
             return _search_error_result(
@@ -179,7 +200,7 @@ def create_server(
         name="extract_url",
         description="Extract the main content from a URL through the upstream model.",
     )
-    def extract_url(
+    async def extract_url(
         url: str,
         mode: ExtractMode = "best_effort",
         max_chars: int = 12000,
@@ -190,7 +211,7 @@ def create_server(
                 mode=mode,
                 max_chars=max_chars,
             )
-            return aggregation_backend.extract_url(request)
+            return await _maybe_await(aggregation_backend.extract_url(request))
         except ValidationError as exc:
             LOGGER.error("extract_url validation failed: %s", exc)
             return _extract_error_result(
@@ -224,13 +245,13 @@ def create_server(
         name="outline_url",
         description="Return a structured outline of a URL or llms.txt-like index.",
     )
-    def outline_url(
+    async def outline_url(
         url: str,
         depth: OutlineDepth = "standard",
     ) -> OutlineResult:
         try:
             request = OutlineUrlRequest(url=parse_http_url(url), depth=depth)
-            return aggregation_backend.outline_url(request)
+            return await _maybe_await(aggregation_backend.outline_url(request))
         except ValidationError as exc:
             LOGGER.error("outline_url validation failed: %s", exc)
             return _outline_error_result(
@@ -262,7 +283,7 @@ def create_server(
         name="docs_qa",
         description="Answer a documentation question using official online docs.",
     )
-    def docs_qa(
+    async def docs_qa(
         question: str,
         url: str | None = None,
         domain_allowlist: list[str] | None = None,
@@ -275,7 +296,7 @@ def create_server(
                 domain_allowlist=domain_allowlist or [],
                 answer_mode=answer_mode,
             )
-            return aggregation_backend.docs_qa(request)
+            return await _maybe_await(aggregation_backend.docs_qa(request))
         except ValidationError as exc:
             LOGGER.error("docs_qa validation failed: %s", exc)
             return _docs_qa_error_result(
@@ -311,10 +332,12 @@ def create_server(
         name="find_official_docs",
         description="Find official documentation entry points for a topic or library.",
     )
-    def find_official_docs(query: str, max_results: int = 5) -> OfficialDocsResult:
+    async def find_official_docs(
+        query: str, max_results: int = 5
+    ) -> OfficialDocsResult:
         try:
             request = FindOfficialDocsRequest(query=query, max_results=max_results)
-            return aggregation_backend.find_official_docs(request)
+            return await _maybe_await(aggregation_backend.find_official_docs(request))
         except ValidationError as exc:
             LOGGER.error("find_official_docs validation failed: %s", exc)
             return _official_docs_error_result(
@@ -349,10 +372,10 @@ def create_server(
             "or web search query."
         ),
     )
-    def resolve_doc_source(query_or_url: str) -> DocSourceResolutionResult:
+    async def resolve_doc_source(query_or_url: str) -> DocSourceResolutionResult:
         try:
             request = DocSourceResolutionRequest(query_or_url=query_or_url)
-            return aggregation_backend.resolve_doc_source(request)
+            return await _maybe_await(aggregation_backend.resolve_doc_source(request))
         except ValidationError as exc:
             LOGGER.error("resolve_doc_source validation failed: %s", exc)
             return _resolve_source_error_result(
@@ -379,6 +402,12 @@ def create_server(
             )
 
     return mcp
+
+
+async def _maybe_await[ResultT](value: ResultT | Awaitable[ResultT]) -> ResultT:
+    if inspect.isawaitable(value):
+        return await cast(Awaitable[ResultT], value)
+    return value
 
 
 def main() -> None:
